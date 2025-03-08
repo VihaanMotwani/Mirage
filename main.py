@@ -1,7 +1,7 @@
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, HttpUrl
-from typing import Optional, List, Dict, Any, Union
+from pydantic import BaseModel
+from typing import Optional, List, Dict, Any
 import aiohttp
 import io
 import json
@@ -22,7 +22,6 @@ from services.deepfake_detector import DeepfakeDetector
 from services.photoshop_detector import PhotoshopDetector
 from services.fact_checker import FactChecker
 from services.trust_calculator import TrustScoreCalculator
-from db.database import get_db_connection
 
 # Configure logging
 logging.basicConfig(
@@ -56,6 +55,8 @@ photoshop_detector = PhotoshopDetector()
 fact_checker = FactChecker()
 trust_calculator = TrustScoreCalculator()
 
+# In-memory storage for verification results (temporary replacement for database)
+verification_history = []
 
 class VerificationResponse(BaseModel):
     trust_score: float
@@ -76,6 +77,22 @@ class VerificationResponse(BaseModel):
 @app.get("/")
 async def root():
     return {"message": "Image Verification API"}
+
+
+@app.get("/api/health")
+async def health_check():
+    """Health check endpoint for monitoring."""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat(),
+        "services": {
+            "metadata_analyzer": "available",
+            "reverse_image_search": "available",
+            "deepfake_detector": "available",
+            "photoshop_detector": "available",
+            "fact_checker": "available"
+        }
+    }
 
 
 @app.post("/api/verify", response_model=VerificationResponse)
@@ -140,27 +157,17 @@ async def verify_image(
             "fact_check_results": fact_check_results
         }
         
-        # Log verification in database
-        conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO verification_logs (
-                source_type, trust_score, metadata_score, reverse_image_score,
-                deepfake_score, photoshop_score, fact_check_score, summary,
-                timestamp, results_json
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """,
-            (
-                source_type, trust_score, component_scores["metadata"],
-                component_scores["reverse_image"], component_scores["deepfake"],
-                component_scores["photoshop"], component_scores["fact_check"],
-                summary, datetime.now(), json.dumps(response)
-            )
-        )
-        conn.commit()
-        cursor.close()
-        conn.close()
+        # Store verification result in memory (instead of database)
+        verification_history.append({
+            "source_type": source_type,
+            "timestamp": datetime.now().isoformat(),
+            "trust_score": trust_score,
+            "results": response
+        })
+        
+        # Keep only the last 50 verifications to prevent memory issues
+        if len(verification_history) > 50:
+            verification_history.pop(0)
         
         return response
         
@@ -169,5 +176,12 @@ async def verify_image(
         raise HTTPException(status_code=500, detail=f"Verification failed: {str(e)}")
 
 
+@app.get("/api/history")
+async def get_verification_history(limit: int = 10):
+    """Get recent verification history (from in-memory storage)."""
+    return verification_history[-limit:] if verification_history else []
+
+
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)
