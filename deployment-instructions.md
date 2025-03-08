@@ -8,7 +8,7 @@
 - API keys for:
   - SerpAPI for reverse image search
   - OpenAI API for DALL-E detection
-  - Google Fact Check API
+  - Perplexity Sonar API
 
 ## Frontend Deployment (Vercel)
 
@@ -54,7 +54,7 @@ Create a `.env` file in your backend directory:
 
 ```
 DATABASE_URL=postgresql://username:password@localhost:5432/imageauth
-GOOGLE_API_KEY=your_google_api_key
+PERPLEXITY_API_KEY=your_perplexity_api_key
 OPENAI_API_KEY=your_openai_api_key
 SERP_API_KEY=your_serp_api_key
 CORS_ORIGINS=https://your-frontend-domain.com
