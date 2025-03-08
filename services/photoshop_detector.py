@@ -94,6 +94,8 @@ class PhotoshopDetector:
         
         return img_cv
     
+    # Update the _error_level_analysis method in services/photoshop_detector.py
+
     def _error_level_analysis(self, img):
         """
         Perform Error Level Analysis to detect manipulated regions.
@@ -101,6 +103,10 @@ class PhotoshopDetector:
         which can indicate manipulation.
         """
         try:
+            # Convert to RGB if image has alpha channel (RGBA)
+            if img.mode == 'RGBA':
+                img = img.convert('RGB')
+            
             # Save to a temporary JPEG with known quality
             temp_io = io.BytesIO()
             img.save(temp_io, 'JPEG', quality=self.ela_quality)

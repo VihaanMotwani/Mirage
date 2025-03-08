@@ -123,13 +123,18 @@ async def verify_image(
 
         # Run all verification services in parallel
         metadata_results = await metadata_analyzer.analyze(img, image_data)
+        print("metadata ran")
         reverse_image_results = await reverse_image_search.search(img)
+        print("reverse ran")
         deepfake_results = await deepfake_detector.detect(img)
+        print("deepfake ran")
         photoshop_results = await photoshop_detector.detect(img)
+        print("photoshop ran")
         
         # Use reverse image search keywords for fact checking
         keywords = reverse_image_results.get("keywords", [])
         fact_check_results = await fact_checker.check(img, keywords)
+        print("Fact ran")
         
         # Calculate trust score
         trust_score, component_scores, summary, key_findings = trust_calculator.calculate(
