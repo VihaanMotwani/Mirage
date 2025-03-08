@@ -6,8 +6,7 @@
 - Python 3.9+
 - PostgreSQL database
 - API keys for:
-  - Google Vision API or SerpAPI for reverse image search
-  - Deepware Scanner API
+  - SerpAPI for reverse image search
   - OpenAI API for DALL-E detection
   - Google Fact Check API
 
@@ -56,7 +55,6 @@ Create a `.env` file in your backend directory:
 ```
 DATABASE_URL=postgresql://username:password@localhost:5432/imageauth
 GOOGLE_API_KEY=your_google_api_key
-DEEPWARE_API_KEY=your_deepware_api_key
 OPENAI_API_KEY=your_openai_api_key
 SERP_API_KEY=your_serp_api_key
 CORS_ORIGINS=https://your-frontend-domain.com
@@ -66,7 +64,7 @@ CORS_ORIGINS=https://your-frontend-domain.com
 
 ```bash
 python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+source venv/bin/activate
 ```
 
 3. **Install Dependencies**
@@ -93,27 +91,6 @@ eb init
 
 # Create environment and deploy
 eb create production-environment
-```
-
-6. **Alternative: Deploy on Fly.io**
-
-```bash
-# Install Fly CLI
-curl -L https://fly.io/install.sh | sh
-
-# Initialize and deploy
-fly launch
-fly secrets set DATABASE_URL=your_database_connection_string
-fly secrets set GOOGLE_API_KEY=your_google_api_key # And other API keys
-fly deploy
-```
-
-## Database Setup (PostgreSQL)
-
-1. **Create Database**
-
-```sql
-CREATE DATABASE imageauth;
 ```
 
 2. **Create Tables**
@@ -143,16 +120,3 @@ Configure logging with CloudWatch (AWS) or Datadog.
 
 - Set up automated database backups
 - Store verification logs with appropriate retention policy
-
-## Scaling Considerations
-
-1. **Frontend Scaling**
-   - Vercel handles this automatically
-
-2. **Backend Scaling**
-   - Configure auto-scaling on AWS/GCP
-   - For Fly.io, use `fly scale` command to adjust resources
-
-3. **Database Scaling**
-   - Consider read replicas for high traffic
-   - Implement database sharding if verification logs grow significantly
