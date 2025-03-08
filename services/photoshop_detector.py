@@ -10,7 +10,7 @@ class PhotoshopDetector:
     """Detects Photoshop manipulation using Error Level Analysis and other techniques."""
     
     def __init__(self):
-        self.ela_quality = 90  # Quality level for ELA
+        self.ela_quality = 90  
     
     async def detect(self, img):
         """
