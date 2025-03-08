@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Import service modules
-from services.image_processor import ImageProcessor
+from services.image_processor import ImageProcessor, upload_and_get_url
 from services.metadata_analyzer import MetadataAnalyzer
 from services.reverse_image_search import ReverseImageSearch
 from services.deepfake_detector import DeepfakeDetector
@@ -128,6 +128,11 @@ async def verify_image(
                     image_data = await response.read()
                     img = image_processor.process_image_bytes(image_data)
                     logger.info("Image processed from URL")
+        
+        if not image_url:
+            img_url = upload_and_get_url(image)
+        else:
+            img_url = image_url
 
         # Run verification services
         logger.info("Starting metadata analysis")
@@ -135,12 +140,13 @@ async def verify_image(
         logger.info("Metadata analysis completed")
 
         logger.info("Starting reverse image search")
-        reverse_image_results = await reverse_image_search.search(img)
+        reverse_image_results = await reverse_image_search.search(img_url)
         logger.info("Reverse image search completed")
 
         logger.info("Starting deepfake detection")
-        detector = DeepfakeDetector(model_path="path/to/downloaded/model/final_999_DeepFakeClassifier_EfficientNetB7_face_2.pt")
-        deepfake_results = await detector.detect(img)
+        # detector = DeepfakeDetector(model_path="path/to/downloaded/model/final_999_DeepFakeClassifier_EfficientNetB7_face_2.pt")
+        # deepfake_results = await detector.detect(img)
+        deepfake_results = await deepfake_detector.detect(img_url)
         logger.info("Deepfake detection completed")
 
         logger.info("Starting Photoshop detection")

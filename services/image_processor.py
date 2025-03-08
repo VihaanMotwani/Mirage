@@ -3,8 +3,49 @@ import io
 import numpy as np
 import cv2
 import logging
+import aiohttp
+import os
 
 logger = logging.getLogger(__name__)
+
+cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME", "your_cloud_name")
+upload_preset = os.getenv("CLOUDINARY_UPLOAD_PRESET", "your_unsigned_upload_preset")
+
+async def upload_and_get_url(img):
+    """
+    Uploads a PIL image to Cloudinary using an unsigned upload preset and returns the image URL.
+    """
+    try:
+        img_format = getattr(img, 'format', 'JPEG')
+        if img_format.upper() not in ['PNG', 'JPG', 'JPEG', 'WEBP']:
+            img_format = 'JPEG'
+        img_byte_arr = io.BytesIO()
+        img.save(img_byte_arr, format=img_format)
+        img_bytes = img_byte_arr.getvalue()
+        
+        upload_url = f"https://api.cloudinary.com/v1_1/{cloud_name}/upload"
+        
+        data = aiohttp.FormData()
+        data.add_field("file",
+                    img_bytes,
+                    filename="image." + img_format.lower(),
+                    content_type="image/" + img_format.lower())
+        data.add_field("upload_preset", upload_preset)
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.post(upload_url, data=data) as resp:
+                if resp.status == 200:
+                    result = await resp.json()
+                    link = result.get("secure_url")
+                    logger.info("Image uploaded successfully to Cloudinary: %s", link)
+                    return link
+                else:
+                    error_message = await resp.text()
+                    logger.error("Cloudinary upload failed with status %d: %s", resp.status, error_message)
+                    return None
+    except Exception as e:
+        logger.error("Error uploading image to Cloudinary: %s", str(e))
+        return None
 
 class ImageProcessor:
     def process_image_bytes(self, image_bytes):
