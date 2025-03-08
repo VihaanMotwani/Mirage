@@ -1,4 +1,3 @@
-# services/fact_checker.py
 import aiohttp
 import logging
 import os
@@ -52,6 +51,7 @@ class FactChecker:
             ],
             "low": []  # Will be determined dynamically for less known sources
         }
+        logger.info("FactChecker initialized with API URL: %s", self.api_url)
     
     async def check(self, img, keywords: List[str]) -> Dict[str, Any]:
         """
@@ -64,8 +64,10 @@ class FactChecker:
         Returns:
             dict: Results including related fact-checks and reliability score
         """
+        logger.info("Starting fact check process")
         try:
             if not keywords or len(keywords) < 2:
+                logger.warning("Insufficient keywords for fact checking. Provided keywords: %s", keywords)
                 return {
                     "score": 50,  # Neutral score
                     "related_fact_checks": [],
@@ -73,25 +75,28 @@ class FactChecker:
                 }
             
             # Construct search query from keywords
-            # Take the top 5 keywords to keep the query focused
             search_keywords = keywords[:5]
-            
-            # Add "fact check" to the query to bias toward fact-checking results
             query = " ".join(search_keywords) + " fact check"
+            logger.debug("Constructed query for general search: %s", query)
             
             # Search both for general fact-checks and specific site fact-checks
             general_results = await self._search_sonar(query)
+            logger.info("General search returned %d results", len(general_results))
             
-            # Additional search specifically for fact-checking sites
             fact_check_query = query + " site:" + " OR site:".join(self.fact_check_sites[:3])
+            logger.debug("Constructed query for specific site search: %s", fact_check_query)
             specific_results = await self._search_sonar(fact_check_query)
+            logger.info("Specific site search returned %d results", len(specific_results))
             
             # Combine and process results
             combined_results = self._merge_results(general_results, specific_results)
+            logger.info("Combined results count: %d", len(combined_results))
             fact_checks = self._extract_fact_checks(combined_results)
+            logger.info("Extracted %d fact-checks", len(fact_checks))
             
             # Calculate score based on the fact-checks found
             score = self._calculate_reliability_score(fact_checks)
+            logger.info("Calculated reliability score: %f", score)
             
             return {
                 "score": score,
@@ -101,7 +106,7 @@ class FactChecker:
             }
             
         except Exception as e:
-            logger.error(f"Fact checking error: {str(e)}")
+            logger.error("Fact checking error: %s", str(e))
             return {
                 "score": 50,  # Neutral score on error
                 "error": str(e),
@@ -118,6 +123,7 @@ class FactChecker:
         Returns:
             list: Search results
         """
+        logger.info("Performing search with query: %s", query)
         try:
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
@@ -129,6 +135,7 @@ class FactChecker:
                 "max_results": 10,  # Limit to top 10 results
                 "search_mode": "internet_search"  # Use internet search mode
             }
+            logger.debug("Search payload: %s", payload)
             
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -137,16 +144,16 @@ class FactChecker:
                     json=payload
                 ) as response:
                     if response.status != 200:
-                        logger.error(f"Perplexity API error: {response.status}")
+                        logger.error("Perplexity API error: %d", response.status)
                         return []
                     
                     result = await response.json()
+                    logger.debug("Received search results: %s", result)
                     
-                    # Extract and return the search results
                     return result.get("results", [])
                     
         except Exception as e:
-            logger.error(f"Perplexity API search error: {str(e)}")
+            logger.error("Perplexity API search error: %s", str(e))
             return []
     
     def _merge_results(self, results1: List[Dict[str, Any]], results2: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -160,17 +167,18 @@ class FactChecker:
         Returns:
             list: Merged search results
         """
+        logger.debug("Merging results from two sources")
         seen_urls = set()
         merged_results = []
         
         for result_set in [results1, results2]:
             for result in result_set:
                 url = result.get("url", "")
-                
                 if url and url not in seen_urls:
                     seen_urls.add(url)
                     merged_results.append(result)
         
+        logger.info("Merged results count: %d", len(merged_results))
         return merged_results
     
     def _extract_fact_checks(self, search_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -183,6 +191,7 @@ class FactChecker:
         Returns:
             list: Extracted fact-checks with standardized format
         """
+        logger.info("Extracting fact-checks from search results")
         fact_checks = []
         
         for result in search_results:
@@ -193,6 +202,7 @@ class FactChecker:
                 
                 # Skip if missing essential information
                 if not (url and title and snippet):
+                    logger.debug("Skipping result due to missing information: %s", result)
                     continue
                 
                 # Parse domain for reliability assessment
@@ -207,6 +217,7 @@ class FactChecker:
                 )
                 
                 if not is_fact_check:
+                    logger.debug("Result is not a fact-check: %s", url)
                     continue
                 
                 # Try to determine the rating
@@ -215,25 +226,27 @@ class FactChecker:
                 # Determine source reliability
                 reliability = self._determine_source_reliability(domain)
                 
-                fact_checks.append({
+                fact_check = {
                     "title": title,
                     "url": url,
                     "source": domain,
                     "description": snippet,
                     "rating": rating,
                     "reliability": reliability
-                })
+                }
+                fact_checks.append(fact_check)
+                logger.debug("Extracted fact-check: %s", fact_check)
                 
             except Exception as e:
-                logger.error(f"Error extracting fact-check: {str(e)}")
+                logger.error("Error extracting fact-check: %s", str(e))
                 continue
         
-        # Sort by reliability (high to low)
         fact_checks.sort(key=lambda x: 
             0 if x["reliability"] == "high" else 
             1 if x["reliability"] == "medium" else 2
         )
         
+        logger.info("Total fact-checks after extraction: %d", len(fact_checks))
         return fact_checks
     
     def _extract_rating(self, title: str, snippet: str) -> str:
@@ -247,10 +260,9 @@ class FactChecker:
         Returns:
             str: Extracted rating or "Unrated"
         """
-        # Combine text for analysis
+        logger.debug("Extracting rating from title and snippet")
         text = f"{title.lower()} {snippet.lower()}"
         
-        # Look for common rating patterns
         if re.search(r'\bfalse\b|\bfake\b|\bmisinformation\b|\bhoax\b', text):
             return "False"
         elif re.search(r'\btrue\b|\baccurate\b|\bcorrect\b|\blegitimate\b', text):
@@ -274,11 +286,13 @@ class FactChecker:
         Returns:
             str: Reliability tier ('high', 'medium', or 'low')
         """
+        logger.debug("Determining reliability for domain: %s", domain)
         for tier, domains in self.reliability_tiers.items():
             if any(trusted_domain in domain for trusted_domain in domains):
+                logger.debug("Domain %s determined as %s reliability", domain, tier)
                 return tier
         
-        # Default to low for unknown sources
+        logger.debug("Domain %s defaulted to low reliability", domain)
         return "low"
     
     def _extract_domain(self, url: str) -> str:
@@ -291,16 +305,16 @@ class FactChecker:
         Returns:
             str: Domain name
         """
+        logger.debug("Extracting domain from URL: %s", url)
         try:
             parsed_url = urlparse(url)
             domain = parsed_url.netloc
-            
-            # Remove 'www.' if present
             if domain.startswith('www.'):
                 domain = domain[4:]
-                
+            logger.debug("Extracted domain: %s", domain)
             return domain
-        except Exception:
+        except Exception as e:
+            logger.error("Error extracting domain: %s", str(e))
             return url
     
     def _calculate_reliability_score(self, fact_checks: List[Dict[str, Any]]) -> float:
@@ -313,34 +327,41 @@ class FactChecker:
         Returns:
             float: Reliability score (0-100)
         """
+        logger.info("Calculating reliability score based on fact-checks")
         if not fact_checks:
-            return 50.0  # Neutral score if no fact-checks found
+            logger.warning("No fact-checks found, returning neutral score of 50.0")
+            return 50.0
         
-        # Initialize starting score
         score = 50.0
-        
-        # Points for having multiple fact-checks
         fact_check_count = len(fact_checks)
+        logger.debug("Fact-check count: %d", fact_check_count)
         if fact_check_count > 1:
-            score += min(fact_check_count * 5, 15)  # Up to 15 points for 3+ fact-checks
+            additional_points = min(fact_check_count * 5, 15)
+            score += additional_points
+            logger.debug("Added %d points for multiple fact-checks", additional_points)
         
-        # Points for high-reliability sources
         high_reliability_count = sum(1 for fc in fact_checks if fc["reliability"] == "high")
+        logger.debug("High reliability count: %d", high_reliability_count)
         if high_reliability_count > 0:
-            score += min(high_reliability_count * 10, 20)  # Up to 20 points
+            additional_points = min(high_reliability_count * 10, 20)
+            score += additional_points
+            logger.debug("Added %d points for high reliability sources", additional_points)
         
-        # Adjust based on ratings
         true_count = sum(1 for fc in fact_checks if fc["rating"] == "True")
         false_count = sum(1 for fc in fact_checks if fc["rating"] == "False")
         mixed_count = sum(1 for fc in fact_checks if fc["rating"] == "Partly false")
+        logger.debug("Rating counts - True: %d, False: %d, Mixed: %d", true_count, false_count, mixed_count)
         
-        # If clear consensus on true or false, adjust score accordingly
         if true_count > false_count + mixed_count:
             score += 15
+            logger.debug("Consensus true detected, added 15 points")
         elif false_count > true_count + mixed_count:
             score -= 15
+            logger.debug("Consensus false detected, subtracted 15 points")
         elif mixed_count > true_count + false_count:
-            score -= 5  # Small penalty for mixed results
+            score -= 5
+            logger.debug("Mixed results detected, subtracted 5 points")
         
-        # Cap the score
-        return max(0, min(100, score))
+        final_score = max(0, min(100, score))
+        logger.info("Final reliability score: %f", final_score)
+        return final_score

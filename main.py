@@ -39,7 +39,7 @@ cors_origins = [origin.strip() for origin in cors_origins_str.split(",")]
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=cors_origins,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -76,12 +76,14 @@ class VerificationResponse(BaseModel):
 
 @app.get("/")
 async def root():
+    logger.info("Root endpoint accessed")
     return {"message": "Image Verification API"}
 
 
 @app.get("/api/health")
 async def health_check():
     """Health check endpoint for monitoring."""
+    logger.info("Health check endpoint accessed")
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
@@ -101,11 +103,14 @@ async def verify_image(
     image: Optional[UploadFile] = File(None),
     image_url: Optional[str] = Form(None),
 ):
+    logger.info(f"Verification started with source_type: {source_type}")
     try:
         # Validate input
         if source_type == "upload" and not image:
+            logger.error("Image file not provided for upload source")
             raise HTTPException(status_code=400, detail="Image file is required")
         if source_type == "url" and not image_url:
+            logger.error("Image URL not provided for URL source")
             raise HTTPException(status_code=400, detail="Image URL is required")
 
         # Process the image based on source type
@@ -113,30 +118,42 @@ async def verify_image(
         if source_type == "upload":
             image_data = await image.read()
             img = image_processor.process_image_bytes(image_data)
+            logger.info("Image processed from upload")
         else:  # source_type == "url"
             async with aiohttp.ClientSession() as session:
                 async with session.get(image_url) as response:
                     if response.status != 200:
+                        logger.error(f"Failed to fetch image from URL: {image_url}")
                         raise HTTPException(status_code=400, detail="Failed to fetch image from URL")
                     image_data = await response.read()
                     img = image_processor.process_image_bytes(image_data)
+                    logger.info("Image processed from URL")
 
         # Run all verification services in parallel
+        logger.info("Starting metadata analysis")
         metadata_results = await metadata_analyzer.analyze(img, image_data)
-        print("metadata ran")
+        logger.info("Metadata analysis completed")
+
+        logger.info("Starting reverse image search")
         reverse_image_results = await reverse_image_search.search(img)
-        print("reverse ran")
+        logger.info("Reverse image search completed")
+
+        logger.info("Starting deepfake detection")
         deepfake_results = await deepfake_detector.detect(img)
-        print("deepfake ran")
+        logger.info("Deepfake detection completed")
+
+        logger.info("Starting Photoshop detection")
         photoshop_results = await photoshop_detector.detect(img)
-        print("photoshop ran")
+        logger.info("Photoshop detection completed")
         
         # Use reverse image search keywords for fact checking
         keywords = reverse_image_results.get("keywords", [])
+        logger.info(f"Starting fact checking with keywords: {keywords}")
         fact_check_results = await fact_checker.check(img, keywords)
-        print("Fact ran")
+        logger.info("Fact checking completed")
         
         # Calculate trust score
+        logger.info("Calculating trust score")
         trust_score, component_scores, summary, key_findings = trust_calculator.calculate(
             metadata_results,
             reverse_image_results,
@@ -144,6 +161,7 @@ async def verify_image(
             photoshop_results,
             fact_check_results
         )
+        logger.info(f"Trust score calculated: {trust_score}")
         
         # Create response
         response = {
@@ -169,10 +187,12 @@ async def verify_image(
             "trust_score": trust_score,
             "results": response
         })
+        logger.info("Verification result stored in history")
         
         # Keep only the last 50 verifications to prevent memory issues
         if len(verification_history) > 50:
             verification_history.pop(0)
+            logger.info("Oldest verification record removed to maintain history limit")
         
         return response
         
@@ -184,9 +204,11 @@ async def verify_image(
 @app.get("/api/history")
 async def get_verification_history(limit: int = 10):
     """Get recent verification history (from in-memory storage)."""
+    logger.info(f"Fetching verification history with limit: {limit}")
     return verification_history[-limit:] if verification_history else []
 
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
+    logger.info(f"Starting server on port {port}")
     uvicorn.run("main:app", host="0.0.0.0", port=port, reload=True)

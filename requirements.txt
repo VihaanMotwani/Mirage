@@ -1,43 +1,43 @@
 # Web Framework
-fastapi==0.103.1
-uvicorn[standard]==0.23.2
-pydantic==2.3.0
-python-multipart==0.0.6
+fastapi
+uvicorn[standard]
+pydantic
+python-multipart
 
 # HTTP and API Client
-aiohttp==3.8.5
-requests==2.31.0
+aiohttp
+requests
 
 # Environment Variables
-python-dotenv==1.0.0
+python-dotenv
 
 # Image Processing
-Pillow==10.0.0
-opencv-python==4.8.0.76
-exifread==3.0.0
+Pillow
+opencv-python
+exifread
 numpy
 
 # Machine Learning (for manipulation & deepfake detection)
-scikit-learn==1.3.0
-scikit-image==0.21.0
-torch==2.0.1  # For deepfake detection models
+scikit-learn
+scikit-image
+torch
 
 # Web Scraping and Parsing (for fact checking)
-beautifulsoup4==4.12.2
-lxml==4.9.3
+beautifulsoup4
+lxml
 
 # Natural Language Processing (for keyword extraction)
-nltk==3.8.1
+nltk
 
 # Development Tools
-pytest==7.4.0
-black==23.7.0
-flake8==6.1.0
+pytest
+black
+flake8
 
 # Logging and Monitoring
-loguru==0.7.0
+loguru
 
 # CORS and Security
-starlette==0.27.0
-python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
+starlette
+python-jose[cryptography]
+passlib[bcrypt]
