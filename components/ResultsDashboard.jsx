@@ -1,4 +1,3 @@
-// components/ResultsDashboard.jsx
 import { useState } from 'react';
 
 export default function ResultsDashboard({ results }) {
