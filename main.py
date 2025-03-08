@@ -7,7 +7,12 @@ import io
 import json
 import uvicorn
 import logging
+import os
 from datetime import datetime
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
 
 # Import service modules
 from services.image_processor import ImageProcessor
@@ -28,14 +33,20 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Image Verification API")
 
+# Get CORS settings from environment variables
+cors_origins_str = os.getenv("CORS_ORIGINS", "http://localhost:3000")
+cors_origins = [origin.strip() for origin in cors_origins_str.split(",")]
+
 # Configure CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # In production, replace with specific origins
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+logger.info(f"CORS configured with origins: {cors_origins}")
 
 # Initialize services
 metadata_analyzer = MetadataAnalyzer()

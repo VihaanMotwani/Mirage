@@ -95,7 +95,7 @@ eb create production-environment
 
 2. **Create Tables**
 
-Run the SQL script provided in the `database-setup.sql` file.
+Run the SQL script provided in the `db/database.sql` file.
 
 3. **Set Up Database User**
 
