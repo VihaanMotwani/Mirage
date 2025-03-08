@@ -3,10 +3,9 @@ import logging
 import os
 import re
 import io
-import base64
 from datetime import datetime
 from urllib.parse import urlparse
-from PIL import Image 
+from PIL import Image
 
 logger = logging.getLogger(__name__)
 
@@ -15,8 +14,11 @@ class ReverseImageSearch:
     
     def __init__(self):
         self.api_key = os.getenv("SERP_API_KEY", "your_serp_api_key_here")
-        self.api_url = "https://serpapi.com/search" 
-        logger.info("ReverseImageSearch initialized with API URL: %s", self.api_url)
+        self.api_url = "https://serpapi.com/search"
+        # Cloudinary settings – update these with your Cloudinary account details.
+        self.cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME", "your_cloud_name")
+        self.upload_preset = os.getenv("CLOUDINARY_UPLOAD_PRESET", "your_unsigned_upload_preset")
+        logger.info("ReverseImageSearch initialized with SERP API URL: %s", self.api_url)
     
     async def search(self, img):
         """
@@ -35,50 +37,16 @@ class ReverseImageSearch:
                 'engine': 'google_reverse_image'
             }
             if isinstance(img, str):
-                # Use the provided URL
+                # Use the provided URL directly.
                 params['image_url'] = img
                 logger.debug("Using URL-based search with image: %s", img)
             else:
-                # Process the PIL image into a base64-encoded data URI.
-                # To avoid the 414 error (Request-URI Too Large), we iteratively reduce the size.
-                logger.debug("Processing PIL image for data URI conversion")
-                img_format = getattr(img, 'format', 'JPEG')
-                if img_format.upper() not in ['PNG', 'JPG', 'JPEG', 'WEBP']:
-                    img_format = 'JPEG'
-                
-                # Set a maximum length for the data URI (you may adjust this threshold)
-                max_uri_length = 5000
-                # Start with a reasonable max dimension and quality.
-                max_dim = 300  # Maximum width/height in pixels
-                quality = 70
-                
-                # Determine resampling method for thumbnailing
-                try:
-                    resample_method = Image.Resampling.LANCZOS
-                except AttributeError:
-                    resample_method = Image.LANCZOS
-
-                # Iteratively reduce image size and quality until the data URI is short enough.
-                while True:
-                    img_copy = img.copy()
-                    img_copy.thumbnail((max_dim, max_dim), resample_method)
-                    img_byte_arr = io.BytesIO()
-                    img_copy.save(img_byte_arr, format=img_format, quality=quality)
-                    img_bytes = img_byte_arr.getvalue()
-                    base64_str = base64.b64encode(img_bytes).decode('utf-8')
-                    data_uri = f"data:image/{img_format.lower()};base64,{base64_str}"
-                    
-                    if len(data_uri) <= max_uri_length or (max_dim <= 50 or quality <= 10):
-                        logger.debug("Final data URI length: %d (max_dim: %d, quality: %d)", 
-                                    len(data_uri), max_dim, quality)
-                        break
-                    # Reduce dimensions and quality further if still too long.
-                    max_dim = int(max_dim * 0.8)
-                    quality = max(10, quality - 10)
-                    logger.debug("Reducing image size further: new max_dim=%d, quality=%d", max_dim, quality)
-                
-                params['image_url'] = data_uri
-                logger.debug("Using data URI for image with format: %s", img_format)
+                # Upload the PIL image to Cloudinary to obtain a public URL.
+                hosted_url = await self.upload_and_get_url(img)
+                if not hosted_url:
+                    raise ValueError("Failed to upload image to Cloudinary.")
+                params['image_url'] = hosted_url
+                logger.debug("Using externally hosted image URL: %s", hosted_url)
             
             logger.info("Sending API request to %s", self.api_url)
             async with aiohttp.ClientSession() as session:
@@ -91,8 +59,44 @@ class ReverseImageSearch:
                 "error": str(e)
             }
     
+    async def upload_and_get_url(self, img):
+        """
+        Uploads a PIL image to Cloudinary using an unsigned upload preset and returns the image URL.
+        """
+        try:
+            img_format = getattr(img, 'format', 'JPEG')
+            if img_format.upper() not in ['PNG', 'JPG', 'JPEG', 'WEBP']:
+                img_format = 'JPEG'
+            img_byte_arr = io.BytesIO()
+            img.save(img_byte_arr, format=img_format)
+            img_bytes = img_byte_arr.getvalue()
+            
+            upload_url = f"https://api.cloudinary.com/v1_1/{self.cloud_name}/upload"
+            
+            data = aiohttp.FormData()
+            data.add_field("file",
+                           img_bytes,
+                           filename="image." + img_format.lower(),
+                           content_type="image/" + img_format.lower())
+            data.add_field("upload_preset", self.upload_preset)
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(upload_url, data=data) as resp:
+                    if resp.status == 200:
+                        result = await resp.json()
+                        link = result.get("secure_url")
+                        logger.info("Image uploaded successfully to Cloudinary: %s", link)
+                        return link
+                    else:
+                        error_message = await resp.text()
+                        logger.error("Cloudinary upload failed with status %d: %s", resp.status, error_message)
+                        return None
+        except Exception as e:
+            logger.error("Error uploading image to Cloudinary: %s", str(e))
+            return None
+    
     async def _process_response(self, response):
-        """Process API response"""
+        """Process API response."""
         if response.status != 200:
             error_message = await response.text()
             logger.error("API error: %d, message: %s", response.status, error_message)
@@ -115,7 +119,7 @@ class ReverseImageSearch:
             link = img_result.get("link")
             snippet = img_result.get("snippet")
             
-            # Try to extract date from snippet or link
+            # Try to extract a date from snippet or link.
             date = self._extract_date(snippet)
             if date:
                 domain = self._extract_domain(link)
@@ -146,7 +150,7 @@ class ReverseImageSearch:
         keywords = self._extract_keywords(" ".join(related_text))
         logger.info("Extracted keywords: %s", keywords)
         
-        # Calculate score
+        # Calculate a score based on the available sources.
         source_count = len(sources_with_dates)
         score = 0
         if source_count > 0:
@@ -158,14 +162,14 @@ class ReverseImageSearch:
                 score += bonus
                 logger.debug("Added bonus for multiple sources: %d", bonus)
             
-            earliest_source = sources_with_dates[0]
-            reliable_domains = ["nytimes.com", "reuters.com", "apnews.com", "bbc.com", 
-                                "washingtonpost.com", "theguardian.com"]
-            for domain in reliable_domains:
-                if domain in earliest_source.get("site", ""):
-                    score += 15
-                    logger.debug("Bonus added for reliable domain: %s", domain)
-                    break
+            if sources_with_dates:
+                reliable_domains = ["nytimes.com", "reuters.com", "apnews.com", "bbc.com", 
+                                    "washingtonpost.com", "theguardian.com"]
+                for domain in reliable_domains:
+                    if domain in sources_with_dates[0].get("site", ""):
+                        score += 15
+                        logger.debug("Bonus added for reliable domain: %s", domain)
+                        break
             
             score = min(score, 100)
             logger.info("Final score calculated: %d", score)
@@ -198,40 +202,29 @@ class ReverseImageSearch:
                 extracted_date = match.group(1)
                 logger.debug("Date extracted using pattern '%s': %s", pattern, extracted_date)
                 return extracted_date
-        
         logger.debug("No date found in text")
         return None
     
     def _date_to_timestamp(self, date_str):
-        """Convert date string to timestamp for comparison."""
+        """Convert date string to a timestamp for comparison."""
         logger.debug("Converting date string to timestamp: %s", date_str)
-        try:
-            formats = [
-                "%d %b %Y",
-                "%b %d, %Y",
-                "%b %d %Y",
-                "%Y-%m-%d",
-                "%m/%d/%Y",
-                "%d/%m/%Y",
-                "%d.%m.%Y"
-            ]
-            
-            for fmt in formats:
-                try:
-                    dt = datetime.strptime(date_str, fmt)
-                    timestamp = dt.timestamp()
-                    logger.debug("Date string %s converted to timestamp %f using format %s", date_str, timestamp, fmt)
-                    return timestamp
-                except ValueError:
-                    continue
-            logger.warning("Failed to parse date string: %s", date_str)
-            return 0
-        except Exception as e:
-            logger.error("Error converting date to timestamp: %s", str(e))
-            return 0
+        formats = [
+            "%d %b %Y", "%b %d, %Y", "%b %d %Y", "%Y-%m-%d",
+            "%m/%d/%Y", "%d/%m/%Y", "%d.%m.%Y"
+        ]
+        for fmt in formats:
+            try:
+                dt = datetime.strptime(date_str, fmt)
+                timestamp = dt.timestamp()
+                logger.debug("Date string %s converted to timestamp %f using format %s", date_str, timestamp, fmt)
+                return timestamp
+            except ValueError:
+                continue
+        logger.warning("Failed to parse date string: %s", date_str)
+        return 0
     
     def _extract_domain(self, url):
-        """Extract domain from URL."""
+        """Extract domain from a URL."""
         logger.debug("Extracting domain from URL: %s", url)
         try:
             parsed_url = urlparse(url)
@@ -249,19 +242,15 @@ class ReverseImageSearch:
         logger.debug("Extracting keywords from text")
         if not text:
             return []
-        
         text = re.sub(r'[^\w\s]', ' ', text.lower())
         words = text.split()
         word_count = {}
-        
         for word in words:
             if len(word) > 3:
                 word_count[word] = word_count.get(word, 0) + 1
-        
         stopwords = ["the", "and", "that", "this", "with", "from", "have", "for", "not", "are", "were"]
         for word in stopwords:
             word_count.pop(word, None)
-        
         sorted_words = sorted(word_count.items(), key=lambda x: x[1], reverse=True)
         keywords = [word for word, count in sorted_words[:10]]
         logger.debug("Keywords extracted: %s", keywords)

@@ -22,6 +22,9 @@ class ImageProcessor:
         """Convert PIL Image to OpenCV format."""
         try:
             logger.info("Converting PIL image to OpenCV format")
+            # Ensure the image is in RGB mode for proper conversion
+            if pil_img.mode != "RGB":
+                pil_img = pil_img.convert("RGB")
             cv2_img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
             logger.info("Successfully converted image to OpenCV format")
             return cv2_img

@@ -21,6 +21,10 @@ numpy
 scikit-learn
 scikit-image
 torch
+torchvision>=0.10.0
+efficientnet-pytorch>=0.7.0
+albumentations>=1.0.3
+pretrainedmodels>=0.7.4
 
 # Web Scraping and Parsing (for fact checking)
 beautifulsoup4

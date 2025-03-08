@@ -113,7 +113,7 @@ async def verify_image(
             logger.error("Image URL not provided for URL source")
             raise HTTPException(status_code=400, detail="Image URL is required")
 
-        # Process the image based on source type
+        # Process the image based on source type using ImageProcessor
         image_processor = ImageProcessor()
         if source_type == "upload":
             image_data = await image.read()
@@ -129,7 +129,7 @@ async def verify_image(
                     img = image_processor.process_image_bytes(image_data)
                     logger.info("Image processed from URL")
 
-        # Run all verification services in parallel
+        # Run verification services
         logger.info("Starting metadata analysis")
         metadata_results = await metadata_analyzer.analyze(img, image_data)
         logger.info("Metadata analysis completed")
@@ -139,13 +139,14 @@ async def verify_image(
         logger.info("Reverse image search completed")
 
         logger.info("Starting deepfake detection")
-        deepfake_results = await deepfake_detector.detect(img)
+        detector = DeepfakeDetector(model_path="path/to/downloaded/model/final_999_DeepFakeClassifier_EfficientNetB7_face_2.pt")
+        deepfake_results = await detector.detect(img)
         logger.info("Deepfake detection completed")
 
         logger.info("Starting Photoshop detection")
         photoshop_results = await photoshop_detector.detect(img)
         logger.info("Photoshop detection completed")
-        
+
         # Use reverse image search keywords for fact checking
         keywords = reverse_image_results.get("keywords", [])
         logger.info(f"Starting fact checking with keywords: {keywords}")
