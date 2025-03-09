@@ -130,7 +130,6 @@ class FactChecker:
                     "analysis_summary": analysis_results.get("summary", ""),
                     "search_query": search_query,
                     "perplexity_result_count": len(perplexity_results),
-                    "raw_search_results": perplexity_results[:3] if len(perplexity_results) > 3 else perplexity_results,
                 }
             except Exception as e:
                 logger.error(f"Error extracting results from OpenAI analysis: {str(e)}")
