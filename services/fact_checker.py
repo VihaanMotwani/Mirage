@@ -629,7 +629,8 @@ Please parse this information into a structured format and analyze the authentic
     def _calculate_reliability_score(self, fact_checks: List[Dict[str, Any]]) -> float:
         """
         Calculate overall reliability score based on found fact-checks.
-        This function integrates the original scoring logic but works with our new format.
+        This revised approach weights each fact-check individually based on its
+        reliability and adjusts the score so that negative ratings have a heavier impact.
         
         Args:
             fact_checks: List of extracted fact-checks
@@ -641,67 +642,42 @@ Please parse this information into a structured format and analyze the authentic
         if not fact_checks:
             logger.warning("No fact-checks found, returning neutral score of 50.0")
             return 50.0
-        
-        # Start with a neutral score
-        score = 50.0
-        fact_check_count = len(fact_checks)
-        logger.debug(f"Fact-check count: {fact_check_count}")
-        
-        # Add points if multiple fact-checks
-        if fact_check_count > 1:
-            additional_points = min(fact_check_count * 5, 15)
-            score += additional_points
-            logger.debug(f"Added {additional_points} points for multiple fact-checks")
-        
-        # Count reliability tiers
-        high_reliability_count = sum(1 for fc in fact_checks if fc.get("reliability") == "high")
-        medium_reliability_count = sum(1 for fc in fact_checks if fc.get("reliability") == "medium")
-        
-        logger.debug(f"High reliability count: {high_reliability_count}")
-        logger.debug(f"Medium reliability count: {medium_reliability_count}")
-        
-        # Add points for high reliability sources
-        if high_reliability_count > 0:
-            additional_points = min(high_reliability_count * 10, 20)
-            score += additional_points
-            logger.debug(f"Added {additional_points} points for high reliability sources")
-        
-        # Add points for medium reliability sources
-        if medium_reliability_count > 0:
-            additional_points = min(medium_reliability_count * 5, 10)
-            score += additional_points
-            logger.debug(f"Added {additional_points} points for medium reliability sources")
-        
-        # Adjust score based on rating prevalence
-        true_count = sum(1 for fc in fact_checks if fc.get("rating") == "True")
-        mostly_true_count = sum(1 for fc in fact_checks if fc.get("rating") == "Mostly True")
-        false_count = sum(1 for fc in fact_checks if fc.get("rating") == "False")
-        mostly_false_count = sum(1 for fc in fact_checks if fc.get("rating") == "Mostly False")
-        mixed_count = sum(1 for fc in fact_checks if fc.get("rating") in ["Partly True", "Partly False"])
-        
-        logger.debug(f"Rating counts - True: {true_count}, Mostly True: {mostly_true_count}, " 
-                   f"False: {false_count}, Mostly False: {mostly_false_count}, Mixed: {mixed_count}")
-        
-        # Calculate a consensus based on the ratings
-        true_total = true_count + mostly_true_count
-        false_total = false_count + mostly_false_count
-        
-        if true_total > false_total + mixed_count:
-            score += 15
-            logger.debug("Consensus 'True' detected, added 15 points")
-        elif false_total > true_total + mixed_count:
-            score -= 15
-            logger.debug("Consensus 'False' detected, subtracted 15 points")
-        elif mixed_count > true_total + false_total:
-            score -= 5
-            logger.debug("Mixed results detected, subtracted 5 points")
-        
-        # Special case: If any highly reliable source says it's false, penalize more
-        if any(fc.get("reliability") == "high" and fc.get("rating") in ["False", "Mostly False"] for fc in fact_checks):
-            score -= 20
-            logger.debug("High reliability source says false, subtracted 20 points")
-        
-        # Cap the score
+
+        score = 50.0  # Start with a neutral baseline
+
+        # Process each fact-check individually
+        for fc in fact_checks:
+            reliability = fc.get("reliability", "low")
+            rating = fc.get("rating", "Unverified")
+            
+            # Determine weight based on reliability tier:
+            # high = 3, medium = 2, low = 1
+            weight = {"high": 3, "medium": 2, "low": 1}.get(reliability, 1)
+            
+            if rating in ["True", "Mostly True"]:
+                # Positive evidence: add 2 points per weight unit
+                delta = weight * 2
+                score += delta
+                logger.debug(f"Added {delta} points for rating '{rating}' with {reliability} reliability")
+            elif rating in ["False", "Mostly False"]:
+                # Negative evidence: subtract 4 points per weight unit
+                delta = weight * 4
+                score -= delta
+                logger.debug(f"Subtracted {delta} points for rating '{rating}' with {reliability} reliability")
+            elif rating in ["Partly True", "Partly False"]:
+                # Partial evidence is adjusted slightly
+                if "True" in rating:
+                    delta = weight * 1
+                    score += delta
+                    logger.debug(f"Added {delta} points for partly true rating with {reliability} reliability")
+                else:
+                    delta = weight * 1
+                    score -= delta
+                    logger.debug(f"Subtracted {delta} points for partly false rating with {reliability} reliability")
+            else:
+                logger.debug(f"No adjustment for rating '{rating}'")
+
+        # Clamp the final score between 0 and 100
         final_score = max(0, min(100, score))
         logger.info(f"Final reliability score: {final_score}")
         return final_score
