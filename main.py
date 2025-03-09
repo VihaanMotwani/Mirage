@@ -30,7 +30,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Image Verification API")
+app = FastAPI(title="Mirage API")
 
 # Get CORS settings from environment variables
 cors_origins_str = os.getenv("CORS_ORIGINS", "http://localhost:3000")
