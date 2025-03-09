@@ -8,8 +8,22 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
+try:
+    import spacy
+except ImportError:
+    spacy = None
+
+try:
+    from nltk.corpus import wordnet as wn
+    import nltk
+except ImportError:
+    wn = None
+    nltk = None
+
+logger = logging.getLogger(__name__)
+
 class FactChecker:
-    """Queries Perplexity Sonar API to find fact-checks relevant to the image."""
+    """Enhanced fact-checking with NLP validation, query expansion, and confidence scoring"""
     
     def __init__(self):
         self.api_key = os.getenv("PERPLEXITY_API_KEY")
@@ -18,103 +32,257 @@ class FactChecker:
         
         self.api_url = "https://api.perplexity.ai/chat/completions"
         
-        # List of known fact-checking sites
+        # Initialize NLP components
+        self.nlp = None
+        if spacy:
+            try:
+                self.nlp = spacy.load("en_core_web_sm")
+            except Exception as e:
+                logger.warning(f"spaCy model load failed: {str(e)}")
+        
+        # Initialize synonym capabilities
+        self.synonym_cache = {}
+        if nltk and wn:
+            try:
+                nltk.data.find('corpora/wordnet')
+            except LookupError:
+                logger.warning("NLTK WordNet corpus not found. Synonym expansion disabled.")
+                wn = None
+        
+        # Fact-checking site configuration
         self.fact_check_sites = [
-            "factcheck.org",
-            "politifact.com",
-            "snopes.com",
-            "apnews.com/hub/ap-fact-check",
-            "reuters.com/fact-check",
-            "checkyourfact.com",
-            "factcheck.afp.com",
-            "fullfact.org",
-            "leadstories.com",
-            "usatoday.com/fact-check"
+            "factcheck.org", "politifact.com", "snopes.com",
+            "apnews.com/hub/ap-fact-check", "reuters.com/fact-check",
+            "checkyourfact.com", "factcheck.afp.com", "fullfact.org",
+            "leadstories.com", "usatoday.com/fact-check", "boomlive.in",
+            "dpa-factchecking.com", "factcrescendo.com", "logically.ai"
         ]
         
-        # Reliability tiers for domains
         self.reliability_tiers = {
             "high": [
-                "reuters.com",
-                "apnews.com",
-                "bbc.com",
-                "npr.org",
-                "politifact.com",
-                "factcheck.org",
-                "snopes.com",
+                "reuters.com", "apnews.com", "bbc.com", "npr.org",
+                "politifact.com", "factcheck.org", "snopes.com",
             ],
             "medium": [
-                "nytimes.com",
-                "washingtonpost.com",
-                "cnn.com",
-                "nbcnews.com",
-                "abcnews.go.com",
-                "theguardian.com",
+                "nytimes.com", "washingtonpost.com", "cnn.com",
+                "nbcnews.com", "abcnews.go.com", "theguardian.com",
                 "usatoday.com",
             ],
-            "low": []  # Will be determined dynamically for less known sources
+            "low": []
         }
-        logger.info("FactChecker initialized with API URL: %s", self.api_url)
-    
+        logger.info("FactChecker initialized with NLP and synonym capabilities")
+
     async def check(self, img, keywords: List[str]) -> Dict[str, Any]:
-        """
-        Check for fact-checking articles related to the image.
-        
-        Args:
-            img: PIL Image object
-            keywords: List of keywords extracted from the image analysis
-            
-        Returns:
-            dict: Results including related fact-checks and reliability score
-        """
-        logger.info("Starting fact check process")
+        """Enhanced check with validation, expansion, and confidence scoring"""
+        logger.info("Starting enhanced fact check process")
         try:
-            if not keywords or len(keywords) < 2:
-                logger.warning("Insufficient keywords for fact checking. Provided keywords: %s", keywords)
+            # Query validation
+            validation_result = self._validate_query(keywords)
+            if not validation_result["valid"]:
+                logger.warning(validation_result["message"])
                 return {
-                    "score": 50,  # Neutral score
+                    "score": max(0, 50 - int((1 - validation_result["confidence"]) * 30)),
                     "related_fact_checks": [],
-                    "message": "Insufficient keywords for fact checking"
+                    "message": validation_result["message"],
+                    "confidence": validation_result["confidence"],
+                    "validation_passed": False
                 }
             
-            # Construct search query from keywords
-            search_keywords = keywords[:5]
+            # Query expansion
+            expanded_keywords = self._expand_query_with_synonyms(keywords)
+            search_keywords = (expanded_keywords + keywords)[:7]  # Prioritize original keywords
             query = " ".join(search_keywords) + " fact check"
-            logger.debug("Constructed query for general search: %s", query)
+            logger.debug(f"Expanded query: {query}")
             
-            # Search both for general fact-checks and specific site fact-checks
+            # Perform searches
             general_results = await self._search_sonar(query)
-            logger.info("General search returned %d results", len(general_results))
-            
             fact_check_query = query + " site:" + " OR site:".join(self.fact_check_sites[:3])
-            logger.debug("Constructed query for specific site search: %s", fact_check_query)
             specific_results = await self._search_sonar(fact_check_query)
-            logger.info("Specific site search returned %d results", len(specific_results))
             
-            # Combine and process results
+            # Process results
             combined_results = self._merge_results(general_results, specific_results)
-            logger.info("Combined results count: %d", len(combined_results))
-            fact_checks = self._extract_fact_checks(combined_results)
-            logger.info("Extracted %d fact-checks", len(fact_checks))
+            fact_checks = self._extract_fact_checks(combined_results, keywords)
             
-            # Calculate score based on the fact-checks found
-            score = self._calculate_reliability_score(fact_checks)
-            logger.info("Calculated reliability score: %f", score)
+            # Calculate enhanced score
+            score = self._calculate_enhanced_score(fact_checks)
             
             return {
                 "score": score,
                 "related_fact_checks": fact_checks,
                 "query_used": query,
-                "raw_result_count": len(combined_results)
+                "raw_result_count": len(combined_results),
+                "validation_confidence": validation_result["confidence"],
+                "expanded_keywords": expanded_keywords
             }
             
         except Exception as e:
-            logger.error("Fact checking error: %s", str(e))
+            logger.error(f"Fact checking error: {str(e)}")
             return {
-                "score": 50,  # Neutral score on error
+                "score": 50,
                 "error": str(e),
                 "related_fact_checks": []
             }
+
+    def _validate_query(self, keywords: List[str]) -> Dict[str, Any]:
+        """Validate query using NLP techniques"""
+        validation_result = {
+            "valid": False,
+            "message": "Invalid query",
+            "confidence": 0.0
+        }
+        
+        if not keywords:
+            return validation_result
+        
+        query_text = " ".join(keywords)
+        
+        # Rule-based validation
+        if len(keywords) < 2:
+            validation_result["message"] = "Insufficient keywords for validation"
+            return validation_result
+        
+        # SpaCy-based validation if available
+        if self.nlp:
+            doc = self.nlp(query_text)
+            verbs = [token.lemma_ for token in doc if token.pos_ == "VERB"]
+            nouns = [token.text for token in doc if token.pos_ in ("NOUN", "PROPN")]
+            
+            if len(verbs) > 0 and len(nouns) > 0:
+                validation_result.update({
+                    "valid": True,
+                    "message": "Valid query structure (contains verbs and nouns)",
+                    "confidence": min(0.9, 0.3 + len(verbs)*0.1 + len(nouns)*0.1)
+                })
+            else:
+                validation_result["message"] = "Query lacks meaningful structure"
+        else:
+            # Fallback regex validation
+            question_pattern = r'\b(who|what|when|where|why|how|is|are|does|did)\b'
+            claim_pattern = r'\b(claim|says?|alleged?|reported|stated)\b'
+            
+            if re.search(question_pattern, query_text, re.I) or re.search(claim_pattern, query_text, re.I):
+                validation_result.update({
+                    "valid": True,
+                    "message": "Contains question or claim indicators",
+                    "confidence": 0.7
+                })
+            else:
+                validation_result["message"] = "No clear question or claim detected"
+        
+        return validation_result
+
+    def _expand_query_with_synonyms(self, keywords: List[str]) -> List[str]:
+        """Expand query using WordNet synonyms"""
+        expanded = []
+        if not wn:
+            return expanded
+        
+        for keyword in keywords:
+            if keyword.lower() in self.synonym_cache:
+                expanded.extend(self.synonym_cache[keyword.lower()])
+                continue
+            
+            synonyms = set()
+            for syn in wn.synsets(keyword):
+                for lemma in syn.lemmas():
+                    name = lemma.name().replace('_', ' ')
+                    if name.lower() != keyword.lower():
+                        synonyms.add(name)
+                        if len(synonyms) >= 2:
+                            break
+                if len(synonyms) >= 2:
+                    break
+            
+            # Cache and add to results
+            self.synonym_cache[keyword.lower()] = list(synonyms)[:2]
+            expanded.extend(self.synonym_cache[keyword.lower()])
+        
+        return expanded
+
+    def _extract_fact_checks(self, search_results: List[Dict[str, Any]], 
+                           original_keywords: List[str]) -> List[Dict[str, Any]]:
+        """Extract fact-checks with match confidence scoring"""
+        fact_checks = []
+        original_lower = [k.lower() for k in original_keywords]
+        
+        for result in search_results:
+            try:
+                url = result.get("url", "")
+                title = result.get("title", "").lower()
+                snippet = result.get("snippet", "").lower()
+                domain = self._extract_domain(url)
+                
+                # Calculate keyword matches
+                title_matches = sum(1 for kw in original_lower if kw in title)
+                snippet_matches = sum(1 for kw in original_lower if kw in snippet)
+                total_matches = title_matches + snippet_matches
+                match_confidence = min(1.0, total_matches / len(original_lower)) if original_lower else 0.0
+                
+                fact_check = {
+                    "title": result.get("title", ""),
+                    "url": url,
+                    "source": domain,
+                    "description": result.get("snippet", ""),
+                    "rating": self._extract_rating(title, snippet),
+                    "reliability": self._determine_source_reliability(domain),
+                    "match_confidence": round(match_confidence, 2),
+                    "keywords_matched": total_matches
+                }
+                
+                if any(site in domain for site in self.fact_check_sites):
+                    fact_checks.append(fact_check)
+                
+            except Exception as e:
+                logger.error(f"Error extracting fact-check: {str(e)}")
+        
+        # Sort by confidence and reliability
+        fact_checks.sort(key=lambda x: (
+            -x["match_confidence"],
+            0 if x["reliability"] == "high" else 1 if x["reliability"] == "medium" else 2
+        ))
+        return fact_checks
+
+    def _calculate_enhanced_score(self, fact_checks: List[Dict[str, Any]]) -> float:
+        """Calculate score with confidence weighting"""
+        if not fact_checks:
+            return 50.0
+        
+        base_score = 50.0
+        weights = {
+            "high": 1.2,
+            "medium": 1.0,
+            "low": 0.7
+        }
+        
+        # Weighted reliability scoring
+        reliability_points = sum(
+            (10 * weights[fc["reliability"]] * fc["match_confidence"])
+            for fc in fact_checks
+        )
+        
+        # Rating analysis with confidence
+        rating_scores = {
+            "True": 0.0,
+            "False": 0.0,
+            "Partly false": 0.0
+        }
+        
+        for fc in fact_checks:
+            rating = fc["rating"]
+            if rating in rating_scores:
+                rating_scores[rating] += 5 * fc["match_confidence"]
+        
+        # Apply rating adjustments
+        if rating_scores["True"] > sum(rating_scores.values()) * 0.6:
+            base_score += 15
+        elif rating_scores["False"] > sum(rating_scores.values()) * 0.6:
+            base_score -= 15
+        elif rating_scores["Partly false"] > sum(rating_scores.values()) * 0.4:
+            base_score -= 5
+        
+        # Combine components
+        final_score = base_score + min(reliability_points, 30)
+        return max(0, min(100, round(final_score, 1)))
     
     async def _search_sonar(self, query: str) -> List[Dict[str, Any]]:
         """
@@ -158,7 +326,11 @@ class FactChecker:
                     citations = []
                     if result.get("choices"):
                         for choice in result["choices"]:
-                            citations.extend(choice.get("message", {}).get("citations", []))
+                            if "message" in choice:
+                                citations.extend(choice["message"].get("citations", []))
+                                # Add content analysis
+                                if "content" in choice["message"]:
+                                    analyze_content(choice["message"]["content"])
                     
                     logger.info("Extracted %d citations", len(citations))
                     return citations
