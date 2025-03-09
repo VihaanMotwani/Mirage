@@ -8,23 +8,9 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-try:
-    import spacy
-except ImportError:
-    spacy = None
-
-try:
-    from nltk.corpus import wordnet as wn
-    import nltk
-except ImportError:
-    wn = None
-    nltk = None
-
-logger = logging.getLogger(__name__)
-
 class FactChecker:
-    """Enhanced fact-checking with NLP validation, query expansion, and confidence scoring"""
-    
+    """Queries Perplexity Sonar API to find fact-checks relevant to the image."""
+
     def __init__(self):
         self.api_key = os.getenv("PERPLEXITY_API_KEY")
         if not self.api_key or self.api_key == "your_perplexity_api_key_here":
@@ -32,267 +18,102 @@ class FactChecker:
         
         self.api_url = "https://api.perplexity.ai/chat/completions"
         
-        # Initialize NLP components
-        self.nlp = None
-        if spacy:
-            try:
-                self.nlp = spacy.load("en_core_web_sm")
-            except Exception as e:
-                logger.warning(f"spaCy model load failed: {str(e)}")
-        
-        # Initialize synonym capabilities
-        self.synonym_cache = {}
-        if nltk and wn:
-            try:
-                nltk.data.find('corpora/wordnet')
-            except LookupError:
-                logger.warning("NLTK WordNet corpus not found. Synonym expansion disabled.")
-                wn = None
-        
-        # Fact-checking site configuration
-        self.fact_check_sites = [
-            "factcheck.org", "politifact.com", "snopes.com",
-            "apnews.com/hub/ap-fact-check", "reuters.com/fact-check",
-            "checkyourfact.com", "factcheck.afp.com", "fullfact.org",
-            "leadstories.com", "usatoday.com/fact-check", "boomlive.in",
-            "dpa-factchecking.com", "factcrescendo.com", "logically.ai"
-        ]
-        
+        # Reliability tiers for domains (you can keep or modify these as needed)
         self.reliability_tiers = {
             "high": [
-                "reuters.com", "apnews.com", "bbc.com", "npr.org",
-                "politifact.com", "factcheck.org", "snopes.com",
+                "reuters.com",
+                "apnews.com",
+                "bbc.com",
+                "npr.org",
+                "politifact.com",
+                "factcheck.org",
+                "snopes.com",
             ],
             "medium": [
-                "nytimes.com", "washingtonpost.com", "cnn.com",
-                "nbcnews.com", "abcnews.go.com", "theguardian.com",
+                "nytimes.com",
+                "washingtonpost.com",
+                "cnn.com",
+                "nbcnews.com",
+                "abcnews.go.com",
+                "theguardian.com",
                 "usatoday.com",
             ],
             "low": []
         }
-        logger.info("FactChecker initialized with NLP and synonym capabilities")
+        logger.info("FactChecker initialized with API URL: %s", self.api_url)
 
-    async def check(self, img, keywords: List[str]) -> Dict[str, Any]:
-        """Enhanced check with validation, expansion, and confidence scoring"""
-        logger.info("Starting enhanced fact check process")
+    async def check(self, content_context: List[Dict[str, str]]) -> Dict[str, Any]:
+        """
+        Check for fact-checking articles related to the provided content (title/description pairs).
+
+        Args:
+            content_context: List of dictionaries, each containing "title" and "description"
+        
+        Returns:
+            dict: Results including related fact-checks and a reliability score
+        """
+        logger.info("Starting fact check process")
         try:
-            # Query validation
-            validation_result = self._validate_query(keywords)
-            if not validation_result["valid"]:
-                logger.warning(validation_result["message"])
+            # Combine the text from all title/description pairs
+            if not content_context:
+                logger.warning("No content context provided.")
                 return {
-                    "score": max(0, 50 - int((1 - validation_result["confidence"]) * 30)),
+                    "score": 50,  # Neutral score
                     "related_fact_checks": [],
-                    "message": validation_result["message"],
-                    "confidence": validation_result["confidence"],
-                    "validation_passed": False
+                    "message": "No content context provided"
                 }
             
-            # Query expansion
-            expanded_keywords = self._expand_query_with_synonyms(keywords)
-            search_keywords = (expanded_keywords + keywords)[:7]  # Prioritize original keywords
-            query = " ".join(search_keywords) + " fact check"
-            logger.debug(f"Expanded query: {query}")
+            combined_text = []
+            for item in content_context:
+                t = item.get("title", "").strip()
+                d = item.get("description", "").strip()
+                combined_text.append(t)
+                combined_text.append(d)
             
-            # Perform searches
-            general_results = await self._search_sonar(query)
-            fact_check_query = query + " site:" + " OR site:".join(self.fact_check_sites[:3])
-            specific_results = await self._search_sonar(fact_check_query)
+            full_text = " ".join(combined_text)
+            if len(full_text) < 10:
+                logger.warning("Insufficient text for fact checking. Combined text < 10 characters.")
+                return {
+                    "score": 50,  # Neutral score
+                    "related_fact_checks": [],
+                    "message": "Insufficient text for fact checking"
+                }
             
-            # Process results
-            combined_results = self._merge_results(general_results, specific_results)
-            fact_checks = self._extract_fact_checks(combined_results, keywords)
+            query = f"{full_text} fact check"
             
-            # Calculate enhanced score
-            score = self._calculate_enhanced_score(fact_checks)
+            logger.debug("Constructed query: %s", query)
+            search_results = await self._search_sonar(query)
+            logger.info("Search returned %d results", len(search_results))
+            
+            fact_checks = self._extract_fact_checks(search_results)
+            logger.info("Extracted %d fact-checks", len(fact_checks))
+            
+            score = self._calculate_reliability_score(fact_checks)
+            logger.info("Calculated reliability score: %f", score)
             
             return {
                 "score": score,
                 "related_fact_checks": fact_checks,
                 "query_used": query,
-                "raw_result_count": len(combined_results),
-                "validation_confidence": validation_result["confidence"],
-                "expanded_keywords": expanded_keywords
+                "raw_result_count": len(search_results)
             }
-            
         except Exception as e:
-            logger.error(f"Fact checking error: {str(e)}")
+            logger.error("Fact checking error: %s", str(e))
             return {
-                "score": 50,
+                "score": 50,  # Neutral score on error
                 "error": str(e),
                 "related_fact_checks": []
             }
 
-    def _validate_query(self, keywords: List[str]) -> Dict[str, Any]:
-        """Validate query using NLP techniques"""
-        validation_result = {
-            "valid": False,
-            "message": "Invalid query",
-            "confidence": 0.0
-        }
-        
-        if not keywords:
-            return validation_result
-        
-        query_text = " ".join(keywords)
-        
-        # Rule-based validation
-        if len(keywords) < 2:
-            validation_result["message"] = "Insufficient keywords for validation"
-            return validation_result
-        
-        # SpaCy-based validation if available
-        if self.nlp:
-            doc = self.nlp(query_text)
-            verbs = [token.lemma_ for token in doc if token.pos_ == "VERB"]
-            nouns = [token.text for token in doc if token.pos_ in ("NOUN", "PROPN")]
-            
-            if len(verbs) > 0 and len(nouns) > 0:
-                validation_result.update({
-                    "valid": True,
-                    "message": "Valid query structure (contains verbs and nouns)",
-                    "confidence": min(0.9, 0.3 + len(verbs)*0.1 + len(nouns)*0.1)
-                })
-            else:
-                validation_result["message"] = "Query lacks meaningful structure"
-        else:
-            # Fallback regex validation
-            question_pattern = r'\b(who|what|when|where|why|how|is|are|does|did)\b'
-            claim_pattern = r'\b(claim|says?|alleged?|reported|stated)\b'
-            
-            if re.search(question_pattern, query_text, re.I) or re.search(claim_pattern, query_text, re.I):
-                validation_result.update({
-                    "valid": True,
-                    "message": "Contains question or claim indicators",
-                    "confidence": 0.7
-                })
-            else:
-                validation_result["message"] = "No clear question or claim detected"
-        
-        return validation_result
-
-    def _expand_query_with_synonyms(self, keywords: List[str]) -> List[str]:
-        """Expand query using WordNet synonyms"""
-        expanded = []
-        if not wn:
-            return expanded
-        
-        for keyword in keywords:
-            if keyword.lower() in self.synonym_cache:
-                expanded.extend(self.synonym_cache[keyword.lower()])
-                continue
-            
-            synonyms = set()
-            for syn in wn.synsets(keyword):
-                for lemma in syn.lemmas():
-                    name = lemma.name().replace('_', ' ')
-                    if name.lower() != keyword.lower():
-                        synonyms.add(name)
-                        if len(synonyms) >= 2:
-                            break
-                if len(synonyms) >= 2:
-                    break
-            
-            # Cache and add to results
-            self.synonym_cache[keyword.lower()] = list(synonyms)[:2]
-            expanded.extend(self.synonym_cache[keyword.lower()])
-        
-        return expanded
-
-    def _extract_fact_checks(self, search_results: List[Dict[str, Any]], 
-                           original_keywords: List[str]) -> List[Dict[str, Any]]:
-        """Extract fact-checks with match confidence scoring"""
-        fact_checks = []
-        original_lower = [k.lower() for k in original_keywords]
-        
-        for result in search_results:
-            try:
-                url = result.get("url", "")
-                title = result.get("title", "").lower()
-                snippet = result.get("snippet", "").lower()
-                domain = self._extract_domain(url)
-                
-                # Calculate keyword matches
-                title_matches = sum(1 for kw in original_lower if kw in title)
-                snippet_matches = sum(1 for kw in original_lower if kw in snippet)
-                total_matches = title_matches + snippet_matches
-                match_confidence = min(1.0, total_matches / len(original_lower)) if original_lower else 0.0
-                
-                fact_check = {
-                    "title": result.get("title", ""),
-                    "url": url,
-                    "source": domain,
-                    "description": result.get("snippet", ""),
-                    "rating": self._extract_rating(title, snippet),
-                    "reliability": self._determine_source_reliability(domain),
-                    "match_confidence": round(match_confidence, 2),
-                    "keywords_matched": total_matches
-                }
-                
-                if any(site in domain for site in self.fact_check_sites):
-                    fact_checks.append(fact_check)
-                
-            except Exception as e:
-                logger.error(f"Error extracting fact-check: {str(e)}")
-        
-        # Sort by confidence and reliability
-        fact_checks.sort(key=lambda x: (
-            -x["match_confidence"],
-            0 if x["reliability"] == "high" else 1 if x["reliability"] == "medium" else 2
-        ))
-        return fact_checks
-
-    def _calculate_enhanced_score(self, fact_checks: List[Dict[str, Any]]) -> float:
-        """Calculate score with confidence weighting"""
-        if not fact_checks:
-            return 50.0
-        
-        base_score = 50.0
-        weights = {
-            "high": 1.2,
-            "medium": 1.0,
-            "low": 0.7
-        }
-        
-        # Weighted reliability scoring
-        reliability_points = sum(
-            (10 * weights[fc["reliability"]] * fc["match_confidence"])
-            for fc in fact_checks
-        )
-        
-        # Rating analysis with confidence
-        rating_scores = {
-            "True": 0.0,
-            "False": 0.0,
-            "Partly false": 0.0
-        }
-        
-        for fc in fact_checks:
-            rating = fc["rating"]
-            if rating in rating_scores:
-                rating_scores[rating] += 5 * fc["match_confidence"]
-        
-        # Apply rating adjustments
-        if rating_scores["True"] > sum(rating_scores.values()) * 0.6:
-            base_score += 15
-        elif rating_scores["False"] > sum(rating_scores.values()) * 0.6:
-            base_score -= 15
-        elif rating_scores["Partly false"] > sum(rating_scores.values()) * 0.4:
-            base_score -= 5
-        
-        # Combine components
-        final_score = base_score + min(reliability_points, 30)
-        return max(0, min(100, round(final_score, 1)))
-    
     async def _search_sonar(self, query: str) -> List[Dict[str, Any]]:
         """
-        Search using Perplexity Sonar API.
-        
+        Search using Perplexity Sonar API, requesting reputable and reliable sources.
+
         Args:
             query: Search query string
             
         Returns:
-            list: Search results from citations
+            list: Search results (citations) from Perplexity
         """
         logger.info("Performing search with query: %s", query)
         try:
@@ -301,10 +122,36 @@ class FactChecker:
                 "Content-Type": "application/json",
                 "accept": "application/json"
             }
-            
+
+            # The first message is the system prompt. The second is from the user.
             payload = {
                 "model": "sonar",
-                "messages": [{"role": "user", "content": query}],
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an AI assistant who can use web retrieval to provide fact-checks, references, and citations. "
+                            "Your goals:"
+                            "1. Provide relevant sources (e.g., articles, fact-checking pages, news outlets, research papers) whenever possible."
+                            "2. Strive for reliability and accuracy, but do not artificially exclude sources unless they are overtly unreliable. "
+                            "3. If unsure about the credibility of a source, include a short disclaimer explaining your uncertainty (e.g., 'This source has limited track record')."
+                            "4. If you find recognized fact-checking organizations (PolitiFact, Snopes, FactCheck.org, etc.), highlight them. "
+                            "5. If you cannot find well-known fact-checks, you may provide other relevant sources but explain that they might not be official or fully verified."
+                            "6. Offer any context that helps evaluate the credibility of a source or article. "
+                            "7. If no relevant fact-check is found, say so explicitly and encourage further research."
+
+                            "Please note:"
+                            "- Return all relevant citations in your response, so users can follow them if they want more information."
+                            "- Maintain clarity and transparency about what is known and unknown."
+                            "- Avoid speculation; focus on the best-available evidence or disclaim if evidence is incomplete."
+                            "- When possible, summarize the key points from the cited sources in a concise way."
+                        )
+                    },
+                    {
+                        "role": "user",
+                        "content": query
+                    }
+                ],
                 "max_tokens": 1000
             }
             
@@ -326,11 +173,7 @@ class FactChecker:
                     citations = []
                     if result.get("choices"):
                         for choice in result["choices"]:
-                            if "message" in choice:
-                                citations.extend(choice["message"].get("citations", []))
-                                # Add content analysis
-                                if "content" in choice["message"]:
-                                    analyze_content(choice["message"]["content"])
+                            citations.extend(choice.get("message", {}).get("citations", []))
                     
                     logger.info("Extracted %d citations", len(citations))
                     return citations
@@ -338,38 +181,13 @@ class FactChecker:
         except Exception as e:
             logger.error("Perplexity API search error: %s", str(e))
             return []
-    
-    def _merge_results(self, results1: List[Dict[str, Any]], results2: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Merge results from multiple searches, removing duplicates.
-        
-        Args:
-            results1: First set of search results
-            results2: Second set of search results
-            
-        Returns:
-            list: Merged search results
-        """
-        logger.debug("Merging results from two sources")
-        seen_urls = set()
-        merged_results = []
-        
-        for result_set in [results1, results2]:
-            for result in result_set:
-                url = result.get("url", "")
-                if url and url not in seen_urls:
-                    seen_urls.add(url)
-                    merged_results.append(result)
-        
-        logger.info("Merged results count: %d", len(merged_results))
-        return merged_results
-    
+
     def _extract_fact_checks(self, search_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
         Extract fact-check information from search results.
-        
+
         Args:
-            search_results: List of search results
+            search_results: List of search results (citations)
             
         Returns:
             list: Extracted fact-checks with standardized format
@@ -380,33 +198,32 @@ class FactChecker:
         for result in search_results:
             try:
                 url = result.get("url", "")
+
                 title = result.get("title", "")
                 snippet = result.get("snippet", "")
                 
-                # Skip if missing essential information
+                # Skip if missing essential info
                 if not (url and title and snippet):
                     logger.debug("Skipping result due to missing information: %s", result)
                     continue
                 
-                # Parse domain for reliability assessment
                 domain = self._extract_domain(url)
                 
-                # Determine if this is likely a fact-check
+                # Determine if this is likely a fact-check.
+                # We no longer check a restricted list of domains,
+                # only the presence of "fact check" or "fact-check" in text or URL.
+                text_lower = f"{title.lower()} {snippet.lower()} {url.lower()}"
                 is_fact_check = (
-                    any(site in domain for site in self.fact_check_sites) or
-                    "fact check" in title.lower() or
-                    "fact check" in snippet.lower() or
-                    "fact-check" in url.lower()
+                    "fact check" in text_lower or
+                    "fact-check" in text_lower or
+                    "debunk" in text_lower
                 )
                 
                 if not is_fact_check:
-                    logger.debug("Result is not a fact-check: %s", url)
+                    logger.debug("Result is not a clear fact-check: %s", url)
                     continue
                 
-                # Try to determine the rating
                 rating = self._extract_rating(title, snippet)
-                
-                # Determine source reliability
                 reliability = self._determine_source_reliability(domain)
                 
                 fact_check = {
@@ -424,6 +241,7 @@ class FactChecker:
                 logger.error("Error extracting fact-check: %s", str(e))
                 continue
         
+        # Sort so higher reliability appears first
         fact_checks.sort(key=lambda x: 
             0 if x["reliability"] == "high" else 
             1 if x["reliability"] == "medium" else 2
@@ -431,11 +249,12 @@ class FactChecker:
         
         logger.info("Total fact-checks after extraction: %d", len(fact_checks))
         return fact_checks
-    
+
     def _extract_rating(self, title: str, snippet: str) -> str:
-        """Improved rating extraction with more patterns"""
+        """
+        Try to detect the rating from the text.
+        """
         text = f"{title.lower()} {snippet.lower()}"
-        
         rating_patterns = {
             "False": r'\b(false|fake|hoax|misinformation|debunked)\b',
             "True": r'\b(true|accurate|correct|legitimate|verified)\b',
@@ -448,11 +267,11 @@ class FactChecker:
             if re.search(pattern, text):
                 return rating
         return "Unrated"
-    
+
     def _determine_source_reliability(self, domain: str) -> str:
         """
         Determine the reliability of a source based on domain.
-        
+
         Args:
             domain: Website domain
             
@@ -467,16 +286,10 @@ class FactChecker:
         
         logger.debug("Domain %s defaulted to low reliability", domain)
         return "low"
-    
+
     def _extract_domain(self, url: str) -> str:
         """
         Extract domain from URL.
-        
-        Args:
-            url: Full URL
-            
-        Returns:
-            str: Domain name
         """
         logger.debug("Extracting domain from URL: %s", url)
         try:
@@ -489,7 +302,7 @@ class FactChecker:
         except Exception as e:
             logger.error("Error extracting domain: %s", str(e))
             return url
-    
+
     def _calculate_reliability_score(self, fact_checks: List[Dict[str, Any]]) -> float:
         """
         Calculate overall reliability score based on found fact-checks.
@@ -508,11 +321,14 @@ class FactChecker:
         score = 50.0
         fact_check_count = len(fact_checks)
         logger.debug("Fact-check count: %d", fact_check_count)
+        
+        # Add points if multiple fact-checks
         if fact_check_count > 1:
             additional_points = min(fact_check_count * 5, 15)
             score += additional_points
             logger.debug("Added %d points for multiple fact-checks", additional_points)
         
+        # Add points if we have high reliability sources
         high_reliability_count = sum(1 for fc in fact_checks if fc["reliability"] == "high")
         logger.debug("High reliability count: %d", high_reliability_count)
         if high_reliability_count > 0:
@@ -520,17 +336,19 @@ class FactChecker:
             score += additional_points
             logger.debug("Added %d points for high reliability sources", additional_points)
         
+        # Adjust score based on rating prevalence
         true_count = sum(1 for fc in fact_checks if fc["rating"] == "True")
         false_count = sum(1 for fc in fact_checks if fc["rating"] == "False")
         mixed_count = sum(1 for fc in fact_checks if fc["rating"] == "Partly false")
+        
         logger.debug("Rating counts - True: %d, False: %d, Mixed: %d", true_count, false_count, mixed_count)
         
         if true_count > false_count + mixed_count:
             score += 15
-            logger.debug("Consensus true detected, added 15 points")
+            logger.debug("Consensus 'True' detected, added 15 points")
         elif false_count > true_count + mixed_count:
             score -= 15
-            logger.debug("Consensus false detected, subtracted 15 points")
+            logger.debug("Consensus 'False' detected, subtracted 15 points")
         elif mixed_count > true_count + false_count:
             score -= 5
             logger.debug("Mixed results detected, subtracted 5 points")

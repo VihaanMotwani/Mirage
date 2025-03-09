@@ -154,10 +154,10 @@ async def verify_image(
         photoshop_results = await photoshop_detector.detect(img)
         logger.info("Photoshop detection completed")
 
-        # Use reverse image search keywords for fact checking
-        keywords = reverse_image_results.get("keywords", [])
-        logger.info(f"Starting fact checking with keywords: {keywords}")
-        fact_check_results = await fact_checker.check(img, keywords)
+        # Use reverse image search's content_context for fact checking
+        content_context = reverse_image_results.get("content_context", [])
+        logger.info(f"Starting fact checking with content context: {content_context}")
+        fact_check_results = await fact_checker.check(content_context)
         logger.info("Fact checking completed")
         
         # Calculate trust score

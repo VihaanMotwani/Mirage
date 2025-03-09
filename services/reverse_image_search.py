@@ -75,8 +75,8 @@ class ReverseImageSearch:
             }
         
         # Process results from the API response
-        data = result.get("data", [])  
-        image_results = data  
+        data = result.get("data", [])
+        image_results = data
         logger.info("Found %d image results", len(image_results))
 
         # Extract sources with dates
@@ -89,7 +89,7 @@ class ReverseImageSearch:
             # Use domain extraction from URL instead of API-provided field
             domain = self._extract_domain(link) if link else ""
 
-            # NEW: Check if API provides a direct date field first
+            # Check if API provides a direct date field first
             api_date = img_result.get("date")
             if api_date:
                 date = api_date  # Use directly if available
@@ -114,17 +114,13 @@ class ReverseImageSearch:
         if sources_with_dates:
             logger.info("Earliest source date: %s", sources_with_dates[0].get("date"))
         
-        # Extract keywords from related text
-        related_text = []
-        for r in image_results[:5]:
-            if r.get("title"):
-                related_text.append(r.get("title", ""))
-            if r.get("description"):
-                related_text.append(r.get("description", ""))
-        
-        logger.debug("Aggregated related text for keyword extraction")
-        keywords = self._extract_keywords(" ".join(related_text))
-        logger.info("Extracted keywords: %s", keywords)
+        # Build a list of (title, description) pairs instead of extracting keywords
+        content_context = []
+        for r in image_results:
+            content_context.append({
+                "title": r.get("title", ""),
+                "description": r.get("description", "")
+            })
         
         # Calculate a score based on the available sources
         source_count = len(sources_with_dates)
@@ -139,8 +135,10 @@ class ReverseImageSearch:
                 logger.debug("Added bonus for multiple sources: %d", bonus)
             
             if sources_with_dates:
-                reliable_domains = ["nytimes.com", "reuters.com", "apnews.com", "bbc.com", 
-                                    "washingtonpost.com", "theguardian.com"]
+                reliable_domains = [
+                    "nytimes.com", "reuters.com", "apnews.com", 
+                    "bbc.com", "washingtonpost.com", "theguardian.com"
+                ]
                 for domain in reliable_domains:
                     if domain in sources_with_dates[0].get("site", ""):
                         score += 15
@@ -150,12 +148,13 @@ class ReverseImageSearch:
             score = min(score, 100)
             logger.info("Final score calculated: %d", score)
         
+        # Return our final response dictionary
         return {
             "score": score,
             "earliest_source": sources_with_dates[0] if sources_with_dates else None,
             "all_sources": sources_with_dates,
             "source_count": source_count,
-            "keywords": keywords,
+            "content_context": content_context,  # Entire content/context returned here
             "result_count": len(image_results)
         }
     
@@ -192,7 +191,8 @@ class ReverseImageSearch:
             try:
                 dt = datetime.strptime(date_str, fmt)
                 timestamp = dt.timestamp()
-                logger.debug("Date string %s converted to timestamp %f using format %s", date_str, timestamp, fmt)
+                logger.debug("Date string %s converted to timestamp %f using format %s", 
+                             date_str, timestamp, fmt)
                 return timestamp
             except ValueError:
                 continue
@@ -212,22 +212,3 @@ class ReverseImageSearch:
         except Exception as e:
             logger.error("Error extracting domain: %s", str(e))
             return url
-    
-    def _extract_keywords(self, text):
-        """Extract relevant keywords from text."""
-        logger.debug("Extracting keywords from text")
-        if not text:
-            return []
-        text = re.sub(r'[^\w\s]', ' ', text.lower())
-        words = text.split()
-        word_count = {}
-        for word in words:
-            if len(word) > 3:
-                word_count[word] = word_count.get(word, 0) + 1
-        stopwords = ["the", "and", "that", "this", "with", "from", "have", "for", "not", "are", "were"]
-        for word in stopwords:
-            word_count.pop(word, None)
-        sorted_words = sorted(word_count.items(), key=lambda x: x[1], reverse=True)
-        keywords = [word for word, count in sorted_words[:10]]
-        logger.debug("Keywords extracted: %s", keywords)
-        return keywords
