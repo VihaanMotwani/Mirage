@@ -21,6 +21,7 @@ numpy
 scikit-learn
 scikit-image
 torch
+scipy
 torchvision>=0.10.0
 efficientnet-pytorch>=0.7.0
 albumentations>=1.0.3
