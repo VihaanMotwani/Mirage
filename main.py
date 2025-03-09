@@ -119,58 +119,141 @@ async def verify_image(
             image_data = await image.read()
             img = image_processor.process_image_bytes(image_data)
             logger.info("Image processed from upload")
-        else:  # source_type == "url"
-            async with aiohttp.ClientSession() as session:
-                async with session.get(image_url) as response:
-                    if response.status != 200:
-                        logger.error(f"Failed to fetch image from URL: {image_url}")
-                        raise HTTPException(status_code=400, detail="Failed to fetch image from URL")
-                    image_data = await response.read()
-                    img = image_processor.process_image_bytes(image_data)
-                    logger.info("Image processed from URL")
-        
-        if not image_url:
-            print(img)
-            img_url = await upload_and_get_url(img)
-        else:
-            img_url = image_url
 
+            # Try to upload to Cloudinary, but don't fail if it doesn't work
+            try:
+                img_url = await upload_and_get_url(img)
+                if not img_url:
+                    logger.warning("Failed to get upload to Cloudinary, will use fallback methods.")
+            except Exception as e:
+                logger.warning(f"Cloudinary upload failed: {str(e)}, will use fallback methods.")
+                img_url = None
+
+        else:  # source_type == "url"
+            img_url = image_url
+            async with aiohttp.ClientSession() as session:
+                try:
+                    async with session.get(image_url) as response:
+                        if response.status != 200:
+                            logger.error(f"Failed to fetch image from URL: {image_url}")
+                            raise HTTPException(status_code=400, detail="Failed to fetch image from URL")
+                        image_data = await response.read()
+                        img = image_processor.process_image_bytes(image_data)
+                        logger.info("Image processed from URL")
+                except Exception as e:
+                    logger.error(f"Error processing URL: {str(e)}")
+                    raise HTTPException(status_code=400, detail=f"Error processing image URL: {str(e)}")
+    
         # Run verification services
         logger.info("Starting metadata analysis")
-        metadata_results = await metadata_analyzer.analyze(img, image_data)
-        logger.info("Metadata analysis completed")
+        try:
+            metadata_results = await metadata_analyzer.analyze(img, image_data)
+            logger.info("Metadata analysis completed")
+
+        except Exception as e:
+            logger.error(f"Metadata analysis failed: {str(e)}")
+            metadata_results = {"score": 50, "error": str(e), "exif_data": {}, "anomalies": []}
 
         logger.info("Starting reverse image search")
-        reverse_image_results = await reverse_image_search.search(img_url)
-        logger.info("Reverse image search completed")
+        if img_url:
+            try:
+                reverse_image_results = await reverse_image_search.search(img_url)
+                logger.info("Reverse image search completed")
+            except Exception as e:
+                logger.error(f"Reverse image search failed: {str(e)}")
+                reverse_image_results = {"score": 50, "error": str(e), "content_context": []}
+        else:
+            logger.warning("Skipping reverse image search due to missing image URL")
+            reverse_image_results = {"score": 50, "error": "No image URL available", "content_context": []}
+
 
         logger.info("Starting deepfake detection")
-        # detector = DeepfakeDetector(model_path="path/to/downloaded/model/final_999_DeepFakeClassifier_EfficientNetB7_face_2.pt")
-        # deepfake_results = await detector.detect(img)
-        deepfake_results = await deepfake_detector.detect(img_url)
-        logger.info("Deepfake detection completed")
+        if img_url:
+            try:
+                # detector = DeepfakeDetector(model_path="path/to/downloaded/model/final_999_DeepFakeClassifier_EfficientNetB7_face_2.pt")
+                # deepfake_results = await detector.detect(img)
+                deepfake_results = await deepfake_detector.detect(img_url)
+                logger.info("Deepfake detection completed")
+            except Exception as e:
+                logger.error(f"Deepfake detection failed: {str(e)}")
+                deepfake_results = {"score": 50, "error": str(e), "is_deepfake": False}
+        else:
+            logger.warning("Skipping deepfake detection due to missing image URL")
+            deepfake_results = {"score": 50, "error": "No image URL available", "is_deepfake": False}
+       
 
         logger.info("Starting Photoshop detection")
-        photoshop_results = await photoshop_detector.detect(img)
-        logger.info("Photoshop detection completed")
+        try:
+            photoshop_results = await photoshop_detector.detect(img)
+            logger.info("Photoshop detection completed")
+        except Exception as e:
+            logger.error(f"Photoshop detection failed: {str(e)}")
+            photoshop_results = {"score": 50, "error": str(e), "manipulation_probability": 0}
 
         # Use reverse image search's content_context for fact checking
         content_context = reverse_image_results.get("content_context", [])
-        logger.info(f"Starting fact checking with content context: {content_context}")
-        fact_check_results = await fact_checker.check(content_context)
-        logger.info("Fact checking completed")
+
+        # If reverse image search didn't provide context, create a basic one
+        if not content_context:
+            logger.info(f"Starting fact checking with content context: {content_context}")
+            # Extract EXIF data if available
+            exif_context = []
+            exif_data = metadata_results.get("exif_data", {})
+            if exif_data:
+                for key, value in exif_data.items():
+                    if key in ["ImageDescription", "UserComment", "XPComment", "XPSubject", "XPTitle", "Comment"]:
+                        if value and len(str(value)) > 5:  # Only use non-empty meaningful fields
+                            exif_context.append(str(value))
+            
+            # Create a basic context
+            basic_context = {
+                "title": "Image verification analysis",
+                "description": "Image submitted for verification"
+            }
+            
+            # Add file metadata if available
+            if source_type == "upload" and image:
+                basic_context["description"] += f" - filename: {image.filename}"
+            
+            # Add any EXIF context
+            if exif_context:
+                basic_context["description"] += " - " + " ".join(exif_context)
+                
+            content_context = [basic_context]
+
+        # Fact checking
+        logger.info(f"Starting fact checking with {len(content_context)} context items")
+        try:
+            fact_check_results = await fact_checker.check(content_context)
+            logger.info("Fact checking completed")
+        except Exception as e:
+            logger.error(f"Fact checking failed: {str(e)}")
+            fact_check_results = {"score": 50, "error": str(e), "related_fact_checks": []}
         
         # Calculate trust score
         logger.info("Calculating trust score")
-        trust_score, component_scores, summary, key_findings = trust_calculator.calculate(
-            metadata_results,
-            reverse_image_results,
-            deepfake_results,
-            photoshop_results,
-            fact_check_results
-        )
-        logger.info(f"Trust score calculated: {trust_score}")
-        
+        try:
+            trust_score, component_scores, summary, key_findings = trust_calculator.calculate(
+                metadata_results,
+                reverse_image_results,
+                deepfake_results,
+                photoshop_results,
+                fact_check_results
+            )
+            logger.info(f"Trust score calculated: {trust_score}")
+        except Exception as e:
+            logger.error(f"Trust score calculation failed: {str(e)}")
+            trust_score = 50
+            component_scores = {
+                "metadata": metadata_results.get("score", 50),
+                "reverse_image": reverse_image_results.get("score", 50),
+                "deepfake": deepfake_results.get("score", 50),
+                "photoshop": photoshop_results.get("score", 50),
+                "fact_check": fact_check_results.get("score", 50)
+            }
+            summary = "Verification results are inconclusive due to processing errors."
+            key_findings = [f"Error: {str(e)}"]
+            
         # Create response
         response = {
             "trust_score": trust_score,

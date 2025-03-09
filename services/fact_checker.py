@@ -54,6 +54,15 @@ class FactChecker:
         """
         logger.info("Starting fact check process")
         try:
+            # Return neutral results if API key is not available
+            if not self.api_key or self.api_key == "your_perplexity_api_key_here":
+                logger.warning("Skipping fact check due to missing or default API key")
+                return {
+                    "score": 50,  # Neutral score
+                    "related_fact_checks": [],
+                    "message": "Fact checking skipped - API key not configured"
+                }
+
             # Combine the text from all title/description pairs
             if not content_context:
                 logger.warning("No content context provided.")
@@ -67,8 +76,10 @@ class FactChecker:
             for item in content_context:
                 t = item.get("title", "").strip()
                 d = item.get("description", "").strip()
-                combined_text.append(t)
-                combined_text.append(d)
+                if t:
+                    combined_text.append(t)
+                if d:
+                    combined_text.append(d)
             
             full_text = " ".join(combined_text)
             if len(full_text) < 10:
@@ -79,6 +90,7 @@ class FactChecker:
                     "message": "Insufficient text for fact checking"
                 }
             
+            # Create a more focussed query to help find relevant fact-checks
             query = f"{full_text} fact check"
             
             logger.debug("Constructed query: %s", query)
@@ -203,7 +215,7 @@ class FactChecker:
                 snippet = result.get("snippet", "")
                 
                 # Skip if missing essential info
-                if not (url and title and snippet):
+                if not (url and (title or snippet)):
                     logger.debug("Skipping result due to missing information: %s", result)
                     continue
                 
@@ -213,33 +225,65 @@ class FactChecker:
                 # We no longer check a restricted list of domains,
                 # only the presence of "fact check" or "fact-check" in text or URL.
                 text_lower = f"{title.lower()} {snippet.lower()} {url.lower()}"
-                is_fact_check = (
-                    "fact check" in text_lower or
-                    "fact-check" in text_lower or
-                    "debunk" in text_lower
-                )
-                
-                if not is_fact_check:
-                    logger.debug("Result is not a clear fact-check: %s", url)
-                    continue
-                
-                rating = self._extract_rating(title, snippet)
-                reliability = self._determine_source_reliability(domain)
-                
-                fact_check = {
-                    "title": title,
-                    "url": url,
-                    "source": domain,
-                    "description": snippet,
-                    "rating": rating,
-                    "reliability": reliability
-                }
-                fact_checks.append(fact_check)
-                logger.debug("Extracted fact-check: %s", fact_check)
+                is_likely_fact_check = any( term in text_lower for term in [
+                    "fact check", "fact-check", "debunk", "verify", "verified", 
+                    "false", "true", "misleading", "fake", "authentic",
+                    "misinformation", "disinformation", "hoax", "rumor", "claim"
+                ])
+                known_fact_checkers = [
+                    "politifact.com", "factcheck.org", "snopes.com", "fullfact.org",
+                    "poynter.org", "truthorfiction.com", "apnews.com/hub/ap-fact-check"
+                ]
+                is_known_fact_checker = any(checker in domain for checker in known_fact_checkers)
+
+                if is_likely_fact_check or is_known_fact_checker:
+                    rating = self._extract_rating(title, snippet)
+                    reliability = self._determine_source_reliability(domain)
+                    
+                    fact_check = {
+                        "title": title,
+                        "url": url,
+                        "source": domain,
+                        "description": snippet,
+                        "rating": rating,
+                        "reliability": reliability
+                    }
+                    fact_checks.append(fact_check)
+                    logger.debug("Extracted fact-check: %s", fact_check)
+                else:
+                    logger.debug("Result is not a clear fact-check: %s", fact_check)
                 
             except Exception as e:
                 logger.error("Error extracting fact-check: %s", str(e))
                 continue
+
+        if not fact_checks and search_results:
+            logger.info("No fact-checks found, using generic extraction for top results")
+            try:
+                 # Take top 3 results as generic information sources
+                for result in search_results[:3]:
+                    url = result.get("url", "")
+                    title = result.get("title", "")
+                    snippet = result.get("snippet", "")
+                    
+                    if not (url and (title or snippet)):
+                        continue
+                    
+                    domain = self._extract_domain(url)
+                    reliability = self._determine_source_reliability(domain)
+                    
+                    fact_check = {
+                        "title": title,
+                        "url": url,
+                        "source": domain,
+                        "description": snippet,
+                        "rating": "Information Source",
+                        "reliability": reliability
+                    }
+                    fact_checks.append(fact_check)
+                    logger.debug("Added generic information source: %s", url)
+            except Exception as e:
+                logger.error("Error during generic extraction: %s", str(e))
         
         # Sort so higher reliability appears first
         fact_checks.sort(key=lambda x: 
@@ -255,17 +299,30 @@ class FactChecker:
         Try to detect the rating from the text.
         """
         text = f"{title.lower()} {snippet.lower()}"
+        
+        # More comprehensive patterns for different rating classifications
         rating_patterns = {
-            "False": r'\b(false|fake|hoax|misinformation|debunked)\b',
-            "True": r'\b(true|accurate|correct|legitimate|verified)\b',
-            "Partly false": r'\b(partially false|half-truth|misleading|mixed|exaggerat|out of context)\b',
-            "Unverified": r'\b(unverified|unsubstantiated|unproven|disputed|questioned)\b',
-            "Outdated": r'\b(outdated|old news|no longer true|superseded)\b'
+            "False": r'\b(false|fake|hoax|misinformation|debunked|untrue|incorrect|fabricated)\b',
+            "True": r'\b(true|accurate|correct|legitimate|verified|confirmed|authentic|real)\b',
+            "Partly false": r'\b(partially false|half-true|half-truth|misleading|mixed|mostly false|exaggerat|out of context|need context|lacks context)\b',
+            "Partly true": r'\b(partly true|partially true|mostly true|slightly misrepresented)\b',
+            "Unverified": r'\b(unverified|unsubstantiated|unproven|disputed|questioned|unclear|not confirmed)\b',
+            "Outdated": r'\b(outdated|old news|no longer true|superseded|dated|former)\b'
         }
         
+        # Check for matches in order of decreasing specificity
         for rating, pattern in rating_patterns.items():
             if re.search(pattern, text):
                 return rating
+        
+        # Special cases for common fact-checking language that doesn't fit the patterns
+        if "pants on fire" in text:
+            return "False"
+        if "pinocchio" in text and "four" in text:
+            return "False"
+        if "pinocchio" in text and "one" in text:
+            return "Partly false"
+        
         return "Unrated"
 
     def _determine_source_reliability(self, domain: str) -> str:

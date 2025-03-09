@@ -1,21 +1,27 @@
 import cv2
 import numpy as np
-import io
-import logging
 from PIL import Image
+import io
+from scipy.fftpack import dct
+from sklearn.cluster import DBSCAN
+import logging
 
 logger = logging.getLogger(__name__)
 
 class PhotoshopDetector:
-    """Detects Photoshop manipulation using Error Level Analysis and other techniques."""
+    """Advanced detector for image manipulations using multiple techniques."""
     
     def __init__(self):
-        self.ela_quality = 90  
-        logger.info("PhotoshopDetector initialized with ELA quality %d", self.ela_quality)
+        self.methods = {
+            "ela": self._error_level_analysis,
+            "noise": self._noise_analysis,
+            "dct": self._dct_analysis,
+            "clone": self._clone_detection
+        }
     
     async def detect(self, img):
         """
-        Detect image manipulation using Error Level Analysis.
+        Detect image manipulations using multiple advanced techniques.
         
         Args:
             img: PIL Image object
@@ -23,64 +29,64 @@ class PhotoshopDetector:
         Returns:
             dict: Detection results
         """
-        logger.info("Starting Photoshop detection")
         try:
             # Convert PIL Image to OpenCV format
             img_cv = self._pil_to_cv2(img)
-            logger.debug("Converted PIL image to OpenCV format")
             
-            # Perform Error Level Analysis
-            logger.info("Performing Error Level Analysis (ELA)")
-            ela_result = self._error_level_analysis(img)
-            logger.debug("ELA result: %s", ela_result)
+            # Run all detection methods
+            ela_result = await self._error_level_analysis(img)
+            noise_result = await self._noise_analysis(img_cv)
+            dct_result = await self._dct_analysis(img_cv)
+            clone_result = await self._clone_detection(img_cv)
+            jpeg_ghost_result = await self._jpeg_ghost_detection(img)
             
-            # Detect inconsistent noise patterns
-            logger.info("Detecting noise inconsistencies")
-            noise_result = self._detect_noise_inconsistency(img_cv)
-            logger.debug("Noise analysis result: %s", noise_result)
+            # Combine results 
+            all_regions = []
+            all_regions.extend(ela_result.get("regions", []))
+            all_regions.extend(noise_result.get("regions", []))
+            all_regions.extend(clone_result.get("regions", []))
             
-            # Detect copy-paste regions
-            logger.info("Detecting cloned regions")
-            clone_result = self._detect_cloned_regions(img_cv)
-            logger.debug("Clone detection result: %s", clone_result)
+            # Calculate weighted score based on all methods
+            weights = {
+                "ela": 0.3,
+                "noise": 0.2,
+                "dct": 0.2,
+                "clone": 0.2,
+                "jpeg_ghost": 0.1
+            }
             
-            # Analyze manipulation probability by combining techniques
-            regions = []
-            if ela_result.get("suspicious_regions"):
-                regions.extend(ela_result["suspicious_regions"])
-            if noise_result.get("suspicious_regions"):
-                regions.extend(noise_result["suspicious_regions"])
-            if clone_result.get("cloned_regions"):
-                regions.extend(clone_result["cloned_regions"])
+            scores = {
+                "ela": ela_result.get("score", 0),
+                "noise": noise_result.get("score", 0),
+                "dct": dct_result.get("score", 0),
+                "clone": clone_result.get("score", 0),
+                "jpeg_ghost": jpeg_ghost_result.get("score", 0)
+            }
             
-            # Calculate overall probability based on highest score from each technique
-            manipulation_probability = max(
-                ela_result.get("manipulation_score", 0),
-                noise_result.get("manipulation_score", 0),
-                clone_result.get("manipulation_score", 0)
-            )
-            logger.info("Calculated manipulation probability: %f", manipulation_probability)
+            weighted_score = sum(scores[method] * weights[method] for method in weights)
             
-            # Invert for consistency (100 = not manipulated)
+            # Calculate manipulation probability
+            manipulation_probability = min(100, weighted_score)
+            
+            # Invert score for consistency (100 = authentic, 0 = manipulated)
             authenticity_score = 100 - manipulation_probability
-            logger.info("Final authenticity score: %f", authenticity_score)
             
             return {
                 "score": authenticity_score,
                 "manipulation_probability": manipulation_probability,
-                "manipulated_regions": regions,
-                "ela_result": ela_result,
-                "noise_result": noise_result,
-                "clone_result": clone_result,
-                "techniques_used": [
-                    "Error Level Analysis (ELA)",
-                    "Noise Inconsistency Detection",
-                    "Clone Detection"
-                ]
+                "manipulated_regions": all_regions,
+                "detection_results": {
+                    "ela": ela_result,
+                    "noise": noise_result,
+                    "dct": dct_result,
+                    "clone": clone_result,
+                    "jpeg_ghost": jpeg_ghost_result
+                },
+                "techniques_used": list(self.methods.keys()) + ["jpeg_ghost"]
             }
             
         except Exception as e:
-            logger.error("Photoshop detection error: %s", str(e))
+            logger.error(f"Manipulation detection error: {str(e)}")
             return {
                 "score": 50,  # Neutral score on error
                 "error": str(e),
@@ -90,291 +96,428 @@ class PhotoshopDetector:
     
     def _pil_to_cv2(self, pil_img):
         """Convert PIL Image to OpenCV format."""
-        logger.info("Converting PIL image to OpenCV format")
-        try:
-            # Convert to RGB if in RGBA
-            if pil_img.mode == 'RGBA':
-                logger.debug("Image mode is RGBA; converting to RGB")
-                pil_img = pil_img.convert('RGB')
-            
-            # Convert to numpy array and then to BGR format
-            img_np = np.array(pil_img)
-            img_cv = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-            logger.info("Successfully converted image to OpenCV format")
-            return img_cv
-        except Exception as e:
-            logger.error("Error in _pil_to_cv2: %s", str(e))
-            raise e
+        # Convert to RGB if it's in RGBA
+        if pil_img.mode == 'RGBA':
+            pil_img = pil_img.convert('RGB')
+        
+        # Convert to numpy array
+        img_np = np.array(pil_img)
+        
+        # Convert RGB to BGR (OpenCV format)
+        return cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
     
-    def _error_level_analysis(self, img):
+    async def _error_level_analysis(self, img):
         """
-        Perform Error Level Analysis to detect manipulated regions.
-        ELA identifies areas that have different compression levels,
-        which can indicate manipulation.
+        Perform Error Level Analysis (ELA) to detect manipulated regions.
+        
+        ELA works by saving the image at a known quality level (e.g., 90%), 
+        then comparing it to the original. Areas with higher error levels 
+        often indicate manipulation.
         """
-        logger.info("Starting Error Level Analysis (ELA)")
         try:
-            # Convert to RGB if image has alpha channel (RGBA)
-            if img.mode == 'RGBA':
-                logger.debug("Image mode is RGBA; converting to RGB for ELA")
-                img = img.convert('RGB')
+            # Quality level for ELA
+            quality = 90
             
             # Save to a temporary JPEG with known quality
             temp_io = io.BytesIO()
-            img.save(temp_io, 'JPEG', quality=self.ela_quality)
+            img.save(temp_io, 'JPEG', quality=quality)
             temp_io.seek(0)
-            logger.debug("Image saved temporarily with quality %d for ELA", self.ela_quality)
             
             # Load the saved image
             saved_img = Image.open(temp_io)
             
-            # Create a new image for ELA results
+            # Initialize error image
             ela_img = Image.new('RGB', img.size, (0, 0, 0))
             
-            # Compare original with resaved image pixel by pixel
+            # Compare original with resaved
             for x in range(img.width):
                 for y in range(img.height):
                     orig_pixel = img.getpixel((x, y))
                     saved_pixel = saved_img.getpixel((x, y))
                     
-                    # Calculate differences for each color channel
+                    # Calculate difference for each channel
                     diff_r = abs(orig_pixel[0] - saved_pixel[0]) * 10
                     diff_g = abs(orig_pixel[1] - saved_pixel[1]) * 10
                     diff_b = abs(orig_pixel[2] - saved_pixel[2]) * 10
                     
-                    # Scale differences for visibility
+                    # Scale for visibility
                     ela_pixel = (min(diff_r, 255), min(diff_g, 255), min(diff_b, 255))
                     ela_img.putpixel((x, y), ela_pixel)
             
-            logger.info("Completed pixel-wise difference calculation for ELA")
-            
-            # Convert the ELA image to numpy array for further analysis
+            # Convert to numpy array for analysis
             ela_np = np.array(ela_img)
+            
+            # Threshold to find suspicious regions
             gray_ela = cv2.cvtColor(ela_np, cv2.COLOR_RGB2GRAY)
             _, thresh = cv2.threshold(gray_ela, 50, 255, cv2.THRESH_BINARY)
-            logger.debug("Thresholding applied on ELA grayscale image")
             
             # Find contours of suspicious regions
             contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            logger.info("Found %d contours in ELA analysis", len(contours))
             
-            # Filter small contours based on minimum area
+            # Filter small contours
             min_area = img.width * img.height * 0.001  # 0.1% of image area
             suspicious_regions = []
+            
             for contour in contours:
                 area = cv2.contourArea(contour)
                 if area > min_area:
                     x, y, w, h = cv2.boundingRect(contour)
                     suspicious_regions.append({
-                        "x": x,
-                        "y": y,
-                        "width": w,
-                        "height": h,
-                        "area": area,
+                        "x": int(x),
+                        "y": int(y),
+                        "width": int(w),
+                        "height": int(h),
+                        "area": int(area),
                         "detection_method": "ELA"
                     })
-            logger.info("Detected %d suspicious regions from ELA", len(suspicious_regions))
             
             # Calculate manipulation score based on suspicious regions
             if suspicious_regions:
                 total_suspicious_area = sum(region["area"] for region in suspicious_regions)
                 image_area = img.width * img.height
                 area_percentage = (total_suspicious_area / image_area) * 100
-                manipulation_score = min(90, area_percentage * 3)  # Scale for sensitivity, cap at 90%
-                logger.info("ELA manipulation score calculated: %f", manipulation_score)
+                
+                # Cap at 90% to avoid absolute certainty
+                manipulation_score = min(90, area_percentage * 3)  # Scale for sensitivity
             else:
                 manipulation_score = 0
-                logger.info("No suspicious regions detected in ELA")
             
             return {
-                "manipulation_score": manipulation_score,
-                "suspicious_regions": suspicious_regions,
+                "score": manipulation_score,
+                "regions": suspicious_regions,
                 "analysis_method": "Error Level Analysis"
             }
             
         except Exception as e:
-            logger.error("ELA error: %s", str(e))
+            logger.error(f"ELA error: {str(e)}")
             return {
-                "manipulation_score": 0,
-                "suspicious_regions": [],
+                "score": 0,
+                "regions": [],
                 "error": str(e)
             }
     
-    def _detect_noise_inconsistency(self, img_cv):
+    async def _noise_analysis(self, img_cv):
         """
         Detect inconsistent noise patterns, which can indicate manipulation.
+        
+        Different parts of an authentic image typically have consistent noise patterns.
+        Inconsistencies can reveal splicing or other manipulations.
         """
-        logger.info("Starting noise inconsistency detection")
         try:
             # Convert to grayscale
             gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-            logger.debug("Converted image to grayscale for noise analysis")
             
-            # Apply median blur to reduce noise
+            # Apply median blur to estimate noise-free image
             median = cv2.medianBlur(gray, 5)
-            logger.debug("Applied median blur")
             
-            # Calculate residual noise by comparing original and blurred image
+            # Calculate residual noise
             residual = cv2.absdiff(gray, median)
             
-            # Apply adaptive thresholding to highlight noise inconsistencies
+            # Enhance noise for better visualization
+            residual_enhanced = cv2.normalize(residual, None, 0, 255, cv2.NORM_MINMAX)
+            
+            # Apply adaptive thresholding to find inconsistent noise regions
             thresh = cv2.adaptiveThreshold(
-                residual, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                residual_enhanced, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
                 cv2.THRESH_BINARY, 11, 2
             )
-            logger.debug("Adaptive thresholding applied on residual noise")
             
             # Find contours of suspicious regions
             contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            logger.info("Found %d contours in noise analysis", len(contours))
             
-            # Filter small contours based on image area
+            # Filter small contours
             min_area = img_cv.shape[0] * img_cv.shape[1] * 0.005  # 0.5% of image area
             suspicious_regions = []
+            
             for contour in contours:
                 area = cv2.contourArea(contour)
                 if area > min_area:
                     x, y, w, h = cv2.boundingRect(contour)
                     suspicious_regions.append({
-                        "x": x,
-                        "y": y,
-                        "width": w,
-                        "height": h,
-                        "area": area,
+                        "x": int(x),
+                        "y": int(y),
+                        "width": int(w),
+                        "height": int(h),
+                        "area": int(area),
                         "detection_method": "Noise Inconsistency"
                     })
-            logger.info("Detected %d suspicious regions from noise analysis", len(suspicious_regions))
             
-            # Calculate manipulation score based on noise analysis
+            # Calculate manipulation score
             if suspicious_regions:
                 total_suspicious_area = sum(region["area"] for region in suspicious_regions)
                 image_area = img_cv.shape[0] * img_cv.shape[1]
                 area_percentage = (total_suspicious_area / image_area) * 100
-                manipulation_score = min(80, area_percentage * 2)  # Scale for sensitivity, cap at 80%
-                logger.info("Noise inconsistency manipulation score: %f", manipulation_score)
+                
+                # Cap at 80%
+                manipulation_score = min(80, area_percentage * 2)
             else:
                 manipulation_score = 0
-                logger.info("No suspicious noise regions detected")
             
             return {
-                "manipulation_score": manipulation_score,
-                "suspicious_regions": suspicious_regions,
+                "score": manipulation_score,
+                "regions": suspicious_regions,
                 "analysis_method": "Noise Inconsistency"
             }
             
         except Exception as e:
-            logger.error("Noise analysis error: %s", str(e))
+            logger.error(f"Noise analysis error: {str(e)}")
             return {
-                "manipulation_score": 0,
-                "suspicious_regions": [],
+                "score": 0,
+                "regions": [],
                 "error": str(e)
             }
     
-    def _detect_cloned_regions(self, img_cv):
+    async def _dct_analysis(self, img_cv):
         """
-        Detect copy-pasted (cloned) regions in an image.
+        Analyze Discrete Cosine Transform (DCT) coefficients for manipulation detection.
+        
+        DCT analysis can reveal inconsistencies in JPEG compression patterns,
+        which often occur in manipulated regions.
         """
-        logger.info("Starting clone detection")
         try:
             # Convert to grayscale
             gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
-            logger.debug("Converted image to grayscale for clone detection")
+            
+            # Analyze blocks of 8x8 pixels (standard JPEG block size)
+            block_size = 8
+            height, width = gray.shape
+            block_counts = ((height // block_size), (width // block_size))
+            
+            # Array to store DCT energy for each block
+            dct_energy = np.zeros((block_counts[0], block_counts[1]))
+            
+            # Process each block
+            for i in range(block_counts[0]):
+                for j in range(block_counts[1]):
+                    # Extract block
+                    block = gray[i*block_size:(i+1)*block_size, j*block_size:(j+1)*block_size]
+                    
+                    # Apply DCT
+                    block_dct = dct(dct(block.T, norm='ortho').T, norm='ortho')
+                    
+                    # Calculate energy (excluding DC component)
+                    energy = np.sum(np.abs(block_dct[1:, 1:]))
+                    dct_energy[i, j] = energy
+            
+            # Normalize energy values
+            dct_energy_norm = cv2.normalize(dct_energy, None, 0, 1, cv2.NORM_MINMAX)
+            
+            # Smooth for better visualization
+            dct_energy_norm = cv2.resize(dct_energy_norm, (width, height), interpolation=cv2.INTER_CUBIC)
+            
+            # Threshold to find inconsistent regions
+            _, thresh = cv2.threshold(dct_energy_norm, 0.7, 1, cv2.THRESH_BINARY)
+            
+            # Convert to 8-bit for contour finding
+            thresh_8bit = (thresh * 255).astype(np.uint8)
+            
+            # Find contours
+            contours, _ = cv2.findContours(thresh_8bit, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            # Calculate manipulation score based on DCT inconsistencies
+            if len(contours) > 0:
+                # More contours indicate more inconsistencies
+                score = min(70, len(contours) * 5)
+            else:
+                score = 0
+                
+            return {
+                "score": score,
+                "dct_inconsistency_level": float(np.std(dct_energy_norm)),
+                "analysis_method": "DCT Analysis"
+            }
+            
+        except Exception as e:
+            logger.error(f"DCT analysis error: {str(e)}")
+            return {
+                "score": 0,
+                "error": str(e)
+            }
+    
+    async def _clone_detection(self, img_cv):
+        """
+        Detect copy-pasted (cloned) regions in an image using feature matching.
+        
+        This identifies areas that have been duplicated within the same image,
+        a common technique in image manipulation.
+        """
+        try:
+            # Convert to grayscale
+            gray = cv2.cvtColor(img_cv, cv2.COLOR_BGR2GRAY)
             
             # Use SIFT for feature detection
             sift = cv2.SIFT_create()
             keypoints, descriptors = sift.detectAndCompute(gray, None)
-            logger.info("Detected %d keypoints using SIFT", len(keypoints))
             
             # If not enough keypoints, return early
             if descriptors is None or len(keypoints) < 10:
-                logger.warning("Not enough keypoints for clone detection")
                 return {
-                    "manipulation_score": 0,
-                    "cloned_regions": [],
+                    "score": 0,
+                    "regions": [],
                     "analysis_method": "Clone Detection"
                 }
             
-            # Match features to themselves using FLANN
-            FLANN_INDEX_KDTREE = 1
-            index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
-            search_params = dict(checks=50)
-            flann = cv2.FlannBasedMatcher(index_params, search_params)
-            matches = flann.knnMatch(descriptors, descriptors, k=2)
-            logger.info("Performed feature matching using FLANN")
+            # Match features to themselves (to find duplicates)
+            matcher = cv2.BFMatcher()
+            matches = matcher.knnMatch(descriptors, descriptors, k=2)
             
-            # Filter good matches based on distance and distinct locations
+            # Filter good matches (similar features but different locations)
             clone_matches = []
             for i, (m, n) in enumerate(matches):
+                # Check if match is good and not the same point
                 if m.distance < 0.7 * n.distance and m.queryIdx != m.trainIdx:
+                    # Get coordinates
                     query_idx = m.queryIdx
                     train_idx = m.trainIdx
+                    
                     p1 = keypoints[query_idx].pt
                     p2 = keypoints[train_idx].pt
+                    
+                    # Calculate distance between points
                     distance = np.sqrt((p1[0] - p2[0])**2 + (p1[1] - p2[1])**2)
+                    
+                    # Only consider matches with significant distance
                     if distance > 50:  # Minimum distance threshold
                         clone_matches.append((keypoints[query_idx], keypoints[train_idx]))
-            logger.info("Found %d clone matches", len(clone_matches))
             
-            # Group nearby matches to find cloned regions
+            # Group nearby matches to find regions
             cloned_regions = []
-            if len(clone_matches) > 5:  # At least 5 matches to consider cloning
+            
+            if len(clone_matches) > 5:  # At least 5 matches needed to consider cloning
+                # Extract point coordinates
                 points = []
                 for kp1, kp2 in clone_matches:
                     points.append((int(kp1.pt[0]), int(kp1.pt[1])))
                     points.append((int(kp2.pt[0]), int(kp2.pt[1])))
+                
+                # Convert to numpy array
                 points_array = np.array(points, dtype=np.int32)
-                logger.debug("Extracted %d keypoint coordinates for clustering", len(points_array))
                 
-                # Scale points to improve clustering performance
-                scaled_points = points_array.astype(np.float32)
-                scaled_points[:, 0] /= img_cv.shape[1]
-                scaled_points[:, 1] /= img_cv.shape[0]
-                
-                # Use DBSCAN clustering to group similar points
-                from sklearn.cluster import DBSCAN
-                clustering = DBSCAN(eps=0.05, min_samples=3).fit(scaled_points)
-                labels = clustering.labels_
-                n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
-                logger.info("DBSCAN clustering found %d clusters", n_clusters)
-                
-                for i in range(n_clusters):
-                    cluster_points = points_array[labels == i]
-                    if len(cluster_points) >= 3:  # Minimum of 3 points to form a region
-                        x, y, w, h = cv2.boundingRect(cluster_points)
-                        min_area = img_cv.shape[0] * img_cv.shape[1] * 0.001
-                        area = w * h
-                        if area > min_area:
-                            cloned_regions.append({
-                                "x": int(x),
-                                "y": int(y),
-                                "width": int(w),
-                                "height": int(h),
-                                "area": int(area),
-                                "detection_method": "Clone Detection"
-                            })
-                logger.info("Detected %d cloned regions", len(cloned_regions))
+                # Use DBSCAN clustering to group points
+                if len(points_array) > 0:
+                    # Scale the points to improve clustering
+                    scaled_points = points_array.astype(np.float32)
+                    scaled_points[:, 0] /= img_cv.shape[1]
+                    scaled_points[:, 1] /= img_cv.shape[0]
+                    
+                    # Apply DBSCAN clustering
+                    clustering = DBSCAN(eps=0.05, min_samples=3).fit(scaled_points)
+                    
+                    # Extract clusters
+                    labels = clustering.labels_
+                    n_clusters = len(set(labels)) - (1 if -1 in labels else 0)
+                    
+                    # For each cluster, find bounding box
+                    for i in range(n_clusters):
+                        cluster_points = points_array[labels == i]
+                        
+                        if len(cluster_points) >= 3:  # At least 3 points
+                            x, y, w, h = cv2.boundingRect(cluster_points)
+                            
+                            # Only add if significant size
+                            min_area = img_cv.shape[0] * img_cv.shape[1] * 0.001
+                            area = w * h
+                            
+                            if area > min_area:
+                                cloned_regions.append({
+                                    "x": int(x),
+                                    "y": int(y),
+                                    "width": int(w),
+                                    "height": int(h),
+                                    "area": int(area),
+                                    "detection_method": "Clone Detection"
+                                })
             
-            # Calculate manipulation score for clone detection
+            # Calculate manipulation score
             manipulation_score = 0
             if cloned_regions:
                 match_ratio = len(clone_matches) / len(keypoints)
                 region_ratio = len(cloned_regions)
+                
+                # Combine both factors
                 manipulation_score = min(85, (match_ratio * 50) + (region_ratio * 10))
-                logger.info("Clone detection manipulation score: %f", manipulation_score)
-            else:
-                logger.info("No cloned regions detected")
-            
+                
             return {
-                "manipulation_score": manipulation_score,
-                "cloned_regions": cloned_regions,
+                "score": manipulation_score,
+                "regions": cloned_regions,
                 "match_count": len(clone_matches),
                 "analysis_method": "Clone Detection"
             }
             
         except Exception as e:
-            logger.error("Clone detection error: %s", str(e))
+            logger.error(f"Clone detection error: {str(e)}")
             return {
-                "manipulation_score": 0,
-                "cloned_regions": [],
+                "score": 0,
+                "regions": [],
+                "error": str(e)
+            }
+    
+    async def _jpeg_ghost_detection(self, img):
+        """
+        Detect JPEG Ghost artifacts that appear in double-compressed images.
+        
+        This technique identifies regions that have been inserted from another
+        JPEG image with different compression parameters.
+        """
+        try:
+            # Save original image at multiple JPEG qualities
+            qualities = [65, 75, 85, 95]
+            ghosts = []
+            
+            for quality in qualities:
+                # Save at current quality
+                temp_io = io.BytesIO()
+                img.save(temp_io, 'JPEG', quality=quality)
+                temp_io.seek(0)
+                
+                # Load saved image
+                saved_img = Image.open(temp_io)
+                saved_np = np.array(saved_img)
+                
+                # Calculate difference with original
+                original_np = np.array(img)
+                diff = np.abs(original_np.astype(np.float32) - saved_np.astype(np.float32))
+                
+                # Convert to grayscale if color
+                if len(diff.shape) == 3:
+                    diff = np.mean(diff, axis=2)
+                
+                # Normalize difference
+                diff_norm = cv2.normalize(diff, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+                
+                # Apply threshold
+                _, thresh = cv2.threshold(diff_norm, 30, 255, cv2.THRESH_BINARY)
+                
+                # Find contours
+                contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                
+                # Calculate ghost score for this quality
+                if contours:
+                    ghost_area = sum(cv2.contourArea(c) for c in contours)
+                    image_area = img.width * img.height
+                    ghost_percentage = (ghost_area / image_area) * 100
+                    
+                    ghosts.append({
+                        "quality": quality,
+                        "ghost_percentage": ghost_percentage
+                    })
+            
+            # Calculate maximum ghost effect
+            if ghosts:
+                max_ghost = max(ghosts, key=lambda x: x["ghost_percentage"])
+                ghost_score = min(75, max_ghost["ghost_percentage"] * 3)
+            else:
+                ghost_score = 0
+                
+            return {
+                "score": ghost_score,
+                "ghosts": ghosts,
+                "analysis_method": "JPEG Ghost"
+            }
+            
+        except Exception as e:
+            logger.error(f"JPEG ghost detection error: {str(e)}")
+            return {
+                "score": 0,
                 "error": str(e)
             }
