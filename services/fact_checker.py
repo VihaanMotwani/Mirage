@@ -12,8 +12,11 @@ class FactChecker:
     """Queries Perplexity Sonar API to find fact-checks relevant to the image."""
     
     def __init__(self):
-        self.api_key = os.getenv("PERPLEXITY_API_KEY", "your_perplexity_api_key_here")
-        self.api_url = "https://api.perplexity.ai/search"
+        self.api_key = os.getenv("PERPLEXITY_API_KEY")
+        if not self.api_key or self.api_key == "your_perplexity_api_key_here":
+            raise ValueError("PERPLEXITY_API_KEY environment variable not set")
+        
+        self.api_url = "https://api.perplexity.ai/chat/completions"
         
         # List of known fact-checking sites
         self.fact_check_sites = [
@@ -121,21 +124,21 @@ class FactChecker:
             query: Search query string
             
         Returns:
-            list: Search results
+            list: Search results from citations
         """
         logger.info("Performing search with query: %s", query)
         try:
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
+                "accept": "application/json"
             }
             
             payload = {
-                "query": query,
-                "max_results": 10,  # Limit to top 10 results
-                "search_mode": "internet_search"  # Use internet search mode
+                "model": "sonar",
+                "messages": [{"role": "user", "content": query}],
+                "max_tokens": 1000
             }
-            logger.debug("Search payload: %s", payload)
             
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -144,13 +147,21 @@ class FactChecker:
                     json=payload
                 ) as response:
                     if response.status != 200:
-                        logger.error("Perplexity API error: %d", response.status)
+                        error_body = await response.text()
+                        logger.error("Perplexity API error: %d - %s", response.status, error_body)
                         return []
                     
                     result = await response.json()
-                    logger.debug("Received search results: %s", result)
+                    logger.debug("Received API response: %s", json.dumps(result, indent=2))
                     
-                    return result.get("results", [])
+                    # Extract citations from the first choice's message
+                    citations = []
+                    if result.get("choices"):
+                        for choice in result["choices"]:
+                            citations.extend(choice.get("message", {}).get("citations", []))
+                    
+                    logger.info("Extracted %d citations", len(citations))
+                    return citations
                     
         except Exception as e:
             logger.error("Perplexity API search error: %s", str(e))
@@ -250,30 +261,20 @@ class FactChecker:
         return fact_checks
     
     def _extract_rating(self, title: str, snippet: str) -> str:
-        """
-        Extract fact-check rating from title or snippet.
-        
-        Args:
-            title: Article title
-            snippet: Article snippet
-            
-        Returns:
-            str: Extracted rating or "Unrated"
-        """
-        logger.debug("Extracting rating from title and snippet")
+        """Improved rating extraction with more patterns"""
         text = f"{title.lower()} {snippet.lower()}"
         
-        if re.search(r'\bfalse\b|\bfake\b|\bmisinformation\b|\bhoax\b', text):
-            return "False"
-        elif re.search(r'\btrue\b|\baccurate\b|\bcorrect\b|\blegitimate\b', text):
-            return "True"
-        elif re.search(r'\bmisleading\b|\bpartly false\b|\bpartially\s+true\b|\bmixed\b', text):
-            return "Partly false"
-        elif re.search(r'\bunsubstantiated\b|\bunverified\b|\bunproven\b', text):
-            return "Unverified"
-        elif re.search(r'\boutdated\b|\bold\b|\bnot current\b', text):
-            return "Outdated"
+        rating_patterns = {
+            "False": r'\b(false|fake|hoax|misinformation|debunked)\b',
+            "True": r'\b(true|accurate|correct|legitimate|verified)\b',
+            "Partly false": r'\b(partially false|half-truth|misleading|mixed|exaggerat|out of context)\b',
+            "Unverified": r'\b(unverified|unsubstantiated|unproven|disputed|questioned)\b',
+            "Outdated": r'\b(outdated|old news|no longer true|superseded)\b'
+        }
         
+        for rating, pattern in rating_patterns.items():
+            if re.search(pattern, text):
+                return rating
         return "Unrated"
     
     def _determine_source_reliability(self, domain: str) -> str:

@@ -13,16 +13,20 @@ class ReverseImageSearch:
     """Service for reverse image searching to find the earliest published version."""
     
     def __init__(self):
-        self.api_key = os.getenv("SERP_API_KEY", "your_serp_api_key_here")
-        self.api_url = "https://serpapi.com/search"
-        logger.info("ReverseImageSearch initialized with SERP API URL: %s", self.api_url)
+        self.api_key = os.getenv("RAPID_API_KEY", "your_rapidapi_key_here")
+        self.api_url = "https://reverse-image-search1.p.rapidapi.com/reverse-image-search"
+        self.headers = {
+            'x-rapidapi-key': self.api_key,
+            'x-rapidapi-host': "reverse-image-search1.p.rapidapi.com"
+        }
+        logger.info("ReverseImageSearch initialized with RapidAPI URL: %s", self.api_url)
     
     async def search(self, img_url):
         """
         Perform reverse image search.
         
         Args:
-            img: PIL Image object or URL string
+            img_url: URL string of image to search
             
         Returns:
             dict: Results including earliest source, similar images, and reliability score
@@ -30,15 +34,14 @@ class ReverseImageSearch:
         logger.info("Starting reverse image search")
         try:
             params = {
-                'api_key': self.api_key,
-                'engine': 'google_reverse_image'
+                'url': img_url,
+                'limit': 100,  # Limit results to process
+                'safe_search': 'off'
             }
-            params['image_url'] = img_url
-            logger.debug("Using URL-based search with image: %s", img_url)
             
             logger.info("Sending API request to %s", self.api_url)
             async with aiohttp.ClientSession() as session:
-                async with session.get(self.api_url, params=params) as response:
+                async with session.get(self.api_url, params=params, headers=self.headers) as response:
                     return await self._process_response(response)
         except Exception as e:
             logger.error("Reverse image search error: %s", str(e))
@@ -57,24 +60,43 @@ class ReverseImageSearch:
                 "error": f"API error: {response.status}",
                 "message": error_message
             }
+        
         result = await response.json()
         logger.info("API request successful")
         
-        # Process results
-        image_results = result.get("image_results", [])
-        logger.info("Found %d image results", len(image_results))
+        # Check for API error response
+        if result.get("status") == "ERROR":
+            error = result.get("error", {})
+            error_message = error.get("message", "Unknown error")
+            logger.error("RapidAPI error: %s", error_message)
+            return {
+                "score": 0,
+                "error": error_message
+            }
         
+        # Process results from the API response
+        data = result.get("data", [])  
+        image_results = data  
+        logger.info("Found %d image results", len(image_results))
+
         # Extract sources with dates
         sources_with_dates = []
         for img_result in image_results:
-            source_name = img_result.get("source")
-            link = img_result.get("link")
-            snippet = img_result.get("snippet")
+            source_name = img_result.get("title")
+            link = img_result.get("link")  # Key changed from 'url' to 'link'
+            snippet = img_result.get("description", "")
             
-            # Try to extract a date from snippet or link.
-            date = self._extract_date(snippet)
+            # Use domain extraction from URL instead of API-provided field
+            domain = self._extract_domain(link) if link else ""
+
+            # NEW: Check if API provides a direct date field first
+            api_date = img_result.get("date")
+            if api_date:
+                date = api_date  # Use directly if available
+            else:
+                date = self._extract_date(snippet)  # Fallback to snippet parsing
+
             if date:
-                domain = self._extract_domain(link)
                 timestamp = self._date_to_timestamp(date)
                 sources_with_dates.append({
                     "date": date,
@@ -93,21 +115,23 @@ class ReverseImageSearch:
             logger.info("Earliest source date: %s", sources_with_dates[0].get("date"))
         
         # Extract keywords from related text
-        related_text = [
-            result.get("title", ""),
-            result.get("snippet", "")
-        ]
-        related_text.extend([r.get("snippet", "") for r in image_results[:5]])
+        related_text = []
+        for r in image_results[:5]:
+            if r.get("title"):
+                related_text.append(r.get("title", ""))
+            if r.get("description"):
+                related_text.append(r.get("description", ""))
+        
         logger.debug("Aggregated related text for keyword extraction")
         keywords = self._extract_keywords(" ".join(related_text))
         logger.info("Extracted keywords: %s", keywords)
         
-        # Calculate a score based on the available sources.
+        # Calculate a score based on the available sources
         source_count = len(sources_with_dates)
         score = 0
         if source_count > 0:
-            score = 50
-            logger.debug("Base score set to 50 due to available sources")
+            score = 15
+            logger.debug("Base score set to 15 due to available sources")
             
             if source_count > 1:
                 bonus = min(source_count * 5, 20)
