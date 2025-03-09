@@ -9,46 +9,48 @@ from urllib.parse import urlparse
 logger = logging.getLogger(__name__)
 
 class FactChecker:
-    """Queries Perplexity Sonar API to find fact-checks relevant to the image."""
+    """
+    Enhanced fact checker that uses Perplexity to gather information and OpenAI to analyze it.
+    This approach leverages Perplexity's search capabilities and OpenAI's contextual understanding
+    for more accurate fact checking of images.
+    """
 
     def __init__(self):
-        self.api_key = os.getenv("PERPLEXITY_API_KEY")
+        self.perplexity_api_key = os.getenv("PERPLEXITY_API_KEY")
+        self.openai_api_key = os.getenv("OPENAI_API_KEY")
         
-        # Don't raise an error, just log a warning - this matches the behavior in check()
-        if not self.api_key or self.api_key == "your_perplexity_api_key_here":
+        # Log warnings if API keys are missing
+        if not self.perplexity_api_key or self.perplexity_api_key == "your_perplexity_api_key_here":
             logger.warning("PERPLEXITY_API_KEY environment variable not set or has default value")
         
-        self.api_url = "https://api.perplexity.ai/chat/completions"
+        if not self.openai_api_key:
+            logger.warning("OPENAI_API_KEY environment variable not set")
         
-        # Reliability tiers for domains
+        self.perplexity_api_url = "https://api.perplexity.ai/chat/completions"
+        self.openai_api_url = "https://api.openai.com/v1/chat/completions"
+        
+        # Reliability tiers for domains - kept from original implementation
         self.reliability_tiers = {
             "high": [
-                "reuters.com",
-                "apnews.com",
-                "bbc.com",
-                "npr.org",
-                "politifact.com",
-                "factcheck.org",
-                "snopes.com",
+                "reuters.com", "apnews.com", "bbc.com", "npr.org", "politifact.com",
+                "factcheck.org", "snopes.com", "aap.com.au", "afp.com", "bbc.co.uk"
             ],
             "medium": [
-                "nytimes.com",
-                "washingtonpost.com",
-                "cnn.com",
-                "nbcnews.com",
-                "abcnews.go.com",
-                "theguardian.com",
-                "usatoday.com",
-                "perplexity.ai",  # Add Perplexity as a medium reliability source
-                "instagram.com"   # Many verified accounts post original content here
+                "nytimes.com", "washingtonpost.com", "cnn.com", "nbcnews.com",
+                "abcnews.go.com", "theguardian.com", "usatoday.com", "perplexity.ai",
+                "instagram.com", "cbsnews.com", "foxnews.com", "time.com", "economist.com"
             ],
-            "low": []
+            "low": [
+                "tabloids", "social-media", "unverified-blogs"
+            ]
         }
-        logger.info("FactChecker initialized with API URL: %s", self.api_url)
+        logger.info("Enhanced FactChecker initialized with two-stage analysis")
 
     async def check(self, content_context: List[Dict[str, str]]) -> Dict[str, Any]:
         """
-        Check for fact-checking articles related to the provided content (title/description pairs).
+        Perform two-stage fact checking:
+        1. Use Perplexity to gather relevant information about the image
+        2. Feed that information to OpenAI for deeper analysis and fact checking
 
         Args:
             content_context: List of dictionaries, each containing "title" and "description"
@@ -56,18 +58,26 @@ class FactChecker:
         Returns:
             dict: Results including related fact-checks and a reliability score
         """
-        logger.info("Starting fact check process")
+        logger.info("Starting enhanced fact check process")
         try:
-            # Return neutral results if API key is not available
-            if not self.api_key or self.api_key == "your_perplexity_api_key_here":
-                logger.warning("Skipping fact check due to missing or default API key")
+            # Return neutral results if API keys are not available
+            if not self.perplexity_api_key or self.perplexity_api_key == "your_perplexity_api_key_here":
+                logger.warning("Skipping fact check due to missing or default Perplexity API key")
                 return {
                     "score": 50,  # Neutral score
                     "related_fact_checks": [],
-                    "message": "Fact checking skipped - API key not configured"
+                    "message": "Fact checking skipped - Perplexity API key not configured"
+                }
+                
+            if not self.openai_api_key:
+                logger.warning("Skipping fact check due to missing OpenAI API key")
+                return {
+                    "score": 50,  # Neutral score
+                    "related_fact_checks": [],
+                    "message": "Fact checking skipped - OpenAI API key not configured"
                 }
 
-            # Combine the text from all title/description pairs
+            # Validate and combine content context
             if not content_context:
                 logger.warning("No content context provided.")
                 return {
@@ -76,77 +86,63 @@ class FactChecker:
                     "message": "No content context provided"
                 }
             
-            combined_text = []
-            for item in content_context:
-                t = item.get("title", "").strip()
-                d = item.get("description", "").strip()
-                if t:
-                    combined_text.append(t)
-                if d:
-                    combined_text.append(d)
-            
-            full_text = " ".join(combined_text)
-            if len(full_text) < 10:
+            # Create search query from context
+            search_query = self._create_search_query(content_context)
+            if not search_query or len(search_query) < 10:
                 logger.warning("Insufficient text for fact checking. Combined text < 10 characters.")
                 return {
                     "score": 50,  # Neutral score
                     "related_fact_checks": [],
                     "message": "Insufficient text for fact checking"
                 }
+                
+            logger.info(f"Created search query: {search_query}")
             
-            # Try multiple query approaches for better results
+            # STAGE 1: Use Perplexity to gather relevant information
+            perplexity_results = await self._search_perplexity(search_query)
+            logger.info(f"Perplexity search returned {len(perplexity_results)} results")
             
-            # First try - direct fact check query
-            query = f"{full_text} fact check"
-            logger.debug("Constructed query: %s", query)
-            search_results = await self._search_sonar(query)
-            logger.info("Search returned %d results", len(search_results))
+            # If Perplexity search failed, return neutral score
+            if not perplexity_results or (isinstance(perplexity_results, dict) and perplexity_results.get("error")):
+                error_msg = perplexity_results.get("error", "Unknown Perplexity search error")
+                logger.warning(f"Perplexity search failed: {error_msg}")
+                return {
+                    "score": 50,
+                    "related_fact_checks": [],
+                    "message": f"Perplexity search failed: {error_msg}"
+                }
             
-            # Second try - if no results, use a verification query
-            if len(search_results) == 0:
-                logger.info("Trying verification query approach")
-                query = f"verify authenticity of {full_text}"
-                search_results = await self._search_sonar(query)
-                logger.info("Verification query returned %d results", len(search_results))
+            # STAGE 2: Use OpenAI to analyze the Perplexity results
+            analysis_results = await self._analyze_with_openai(search_query, perplexity_results)
+            logger.info("OpenAI analysis completed successfully")
             
-            # Third try - if still no results, use key terms
-            if len(search_results) == 0:
-                # Extract key terms for a more focused search
-                key_terms = self._extract_key_terms(full_text)
-                if key_terms:
-                    logger.info("Trying alternative search with key terms: %s", key_terms)
-                    alt_query = f"{key_terms} verification OR fact check"
-                    search_results = await self._search_sonar(alt_query)
-                    logger.info("Alternative search returned %d results", len(search_results))
-                    
-            # Final try - if all else fails, do a general fact checking query
-            if len(search_results) == 0:
-                logger.info("Trying general fact checking query")
-                general_query = "Recent fact checks on viral images"
-                search_results = await self._search_sonar(general_query)
-                logger.info("General fact check query returned %d results", len(search_results))
-            
-            fact_checks = self._extract_fact_checks(search_results)
-            logger.info("Extracted %d fact-checks", len(fact_checks))
-            
-            # If no fact checks found, generate placeholder generic sources 
-            if not fact_checks and len(search_results) == 0:
-                logger.info("No search results found, creating generic info sources")
-                fact_checks = self._create_generic_info_sources(full_text)
-                logger.info("Created %d generic info sources", len(fact_checks))
-            
-            score = self._calculate_reliability_score(fact_checks)
-            logger.info("Calculated reliability score: %f", score)
-            
-            return {
-                "score": score,
-                "related_fact_checks": fact_checks,
-                "query_used": query,
-                "raw_result_count": len(search_results)
-            }
+            # Extract structured information from OpenAI's analysis
+            try:
+                # Extract the main components from the analysis
+                fact_checks = analysis_results.get("fact_checks", [])
+                score = analysis_results.get("score", 50)
+                
+                logger.info(f"Analysis returned {len(fact_checks)} fact checks with score: {score}")
+                
+                return {
+                    "score": score,
+                    "related_fact_checks": fact_checks,
+                    "analysis_summary": analysis_results.get("summary", ""),
+                    "search_query": search_query,
+                    "perplexity_result_count": len(perplexity_results),
+                    "raw_search_results": perplexity_results[:3] if len(perplexity_results) > 3 else perplexity_results,
+                }
+            except Exception as e:
+                logger.error(f"Error extracting results from OpenAI analysis: {str(e)}")
+                return {
+                    "score": 50,
+                    "error": str(e),
+                    "related_fact_checks": self._create_generic_info_sources("Image verification"),
+                    "message": f"Error during OpenAI analysis: {str(e)}"
+                }
+                
         except Exception as e:
-            logger.error("Fact checking error: %s", str(e))
-            # Return fallback generic results instead of just an error
+            logger.error(f"Enhanced fact checking error: {str(e)}")
             return {
                 "score": 50,  # Neutral score on error
                 "error": str(e),
@@ -154,14 +150,591 @@ class FactChecker:
                 "message": f"Error during fact checking: {str(e)}"
             }
 
+    def _create_search_query(self, content_context: List[Dict[str, str]]) -> str:
+        """Create an optimized search query from the content context"""
+        combined_text = []
+        for item in content_context:
+            t = item.get("title", "").strip()
+            d = item.get("description", "").strip()
+            if t and len(t) > 3:
+                combined_text.append(t)
+            if d and len(d) > 3:
+                combined_text.append(d)
+        
+        # Join all content with spaces
+        full_text = " ".join(combined_text)
+        
+        # Create a more targeted search query
+        query = f"{full_text} fact check verification authentic"
+        
+        # If the query is too long, extract key terms
+        if len(query) > 300:
+            query = self._extract_key_terms(full_text) + " image authentic fact check verification"
+            
+        return query
+
     def _extract_key_terms(self, text: str) -> str:
-        """
-        Extract key terms from text for better searching
-        """
-        # Simple method: take the first 3-5 words that are at least 4 chars long
+        """Extract key terms from text for better searching"""
+        # Simple extraction of longer words which are more likely to be significant
         words = [w for w in text.split() if len(w) >= 4]
-        key_words = words[:min(5, len(words))]
+        
+        # Get the most unique words that might help identify the image
+        # Prioritize proper nouns (capitalized words not at the start of sentences)
+        proper_nouns = []
+        for i, word in enumerate(words):
+            if i > 0 and word[0].isupper():
+                proper_nouns.append(word)
+                
+        # If we have proper nouns, prioritize them
+        if proper_nouns and len(proper_nouns) >= 3:
+            key_words = proper_nouns[:min(7, len(proper_nouns))]
+        else:
+            key_words = words[:min(7, len(words))]
+            
         return " ".join(key_words)
+
+    async def _search_perplexity(self, query: str) -> Dict[str, Any]:
+        """
+        Search using Perplexity API to gather relevant information about the image in a structured format.
+        
+        Args:
+            query: Search query string
+            
+        Returns:
+            dict: Raw search results with detailed information
+        """
+        logger.info(f"Searching Perplexity with query: {query}")
+        try:
+            if not self.perplexity_api_key or self.perplexity_api_key == "your_perplexity_api_key_here":
+                logger.warning("Skipping Perplexity search due to missing API key")
+                return {"error": "Perplexity API key not configured"}
+
+            headers = {
+                "Authorization": f"Bearer {self.perplexity_api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json"
+            }
+
+            payload = {
+                "model": "sonar",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are a fact-checking research assistant that retrieves information about images or news stories. "
+                            "When providing information, use this structured format:\n\n"
+                            "ARTICLE 1:\n"
+                            "SOURCE: [Publication or website name]\n"
+                            "URL: [URL if available]\n"
+                            "CLAIM: [What this source states about the image/story]\n"
+                            "DATE: [Publication date if available]\n\n"
+                            "ARTICLE 2:\n"
+                            "SOURCE: [Different publication]\n"
+                            "URL: [URL if available]\n"
+                            "CLAIM: [Content from this source]\n"
+                            "DATE: [Publication date if available]\n\n"
+                            "And so on for each source you find...\n\n"
+                            "Finally, include a SUMMARY section with key points about the image/story verification status.\n\n"
+                            "Focus on finding fact-checking articles, news reports, and authoritative sources. "
+                            "Search extensively to determine if the subject is authentic, manipulated, or misrepresented."
+                        )
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Find detailed information about whether this image or news story is authentic or fake: {query}"
+                    }
+                ],
+                "options": {
+                    "search_focus": "internet"
+                },
+                "max_tokens": 1500
+            }
+            
+            logger.debug(f"Perplexity API request payload: {json.dumps(payload)}")
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.perplexity_api_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=20
+                ) as response:
+                    response_text = await response.text()
+                    logger.debug(f"Perplexity API response status: {response.status}")
+                    
+                    if response.status != 200:
+                        logger.error(f"Perplexity API error: {response.status} - {response_text[:500]}")
+                        return {"error": f"Perplexity API error: {response.status}"}
+                    
+                    result = json.loads(response_text)
+                    
+                    # Extract the raw content from Perplexity's response
+                    perplexity_content = ""
+                    if "choices" in result:
+                        for choice in result["choices"]:
+                            msg = choice.get("message", {})
+                            perplexity_content += msg.get("content", "")
+                    
+                    logger.info("Successfully retrieved information from Perplexity")
+                    
+                    # Return the raw content for OpenAI to parse
+                    return {
+                        "raw_content": perplexity_content,
+                        "result_found": bool(perplexity_content.strip()),
+                        "query": query
+                    }
+            
+            logger.debug(f"Perplexity API request payload: {json.dumps(payload)}")
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.perplexity_api_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=20  # Increased timeout for more thorough search
+                ) as response:
+                    response_text = await response.text()
+                    logger.debug(f"Perplexity API response status: {response.status}")
+                    
+                    if response.status != 200:
+                        logger.error(f"Perplexity API error: {response.status} - {response_text[:500]}")
+                        return {"error": f"Perplexity API error: {response.status}"}
+                    
+                    result = json.loads(response_text)
+                    
+                    # Extract all available information
+                    sources = []
+                    content = ""
+                    
+                    if "choices" in result:
+                        for choice in result["choices"]:
+                            msg = choice.get("message", {})
+                            
+                            # Extract citations if available
+                            if "citations" in msg:
+                                sources.extend(msg["citations"])
+                            elif "content_citations" in msg:
+                                sources.extend(msg["content_citations"])
+                                
+                            # Always capture the full content
+                            content += msg.get("content", "")
+                    
+                    # If no structured citations but we have content, extract information from content
+                    if not sources and content:
+                        logger.info("No structured citations found, extracting from content")
+                        content_source = self._extract_citations_from_content(content)
+                        sources.append(content_source)
+                        
+                        # Also extract any URLs mentioned in the content
+                        urls = self._extract_urls_from_text(content)
+                        for url in urls:
+                            domain = self._extract_domain(url)
+                            if domain:
+                                sources.append({
+                                    "url": url,
+                                    "title": f"Source from {domain}",
+                                    "snippet": "URL extracted from content"
+                                })
+                    
+                    # Enrich sources with additional information
+                    enriched_sources = []
+                    for source in sources:
+                        if not source:
+                            continue
+                            
+                        url = source.get("url", "")
+                        if not url:
+                            continue
+                            
+                        domain = self._extract_domain(url)
+                        reliability = self._determine_source_reliability(domain)
+                        
+                        enriched_source = {
+                            "url": url,
+                            "title": source.get("title", f"Source from {domain}"),
+                            "snippet": source.get("snippet", ""),
+                            "source": domain,
+                            "reliability": reliability
+                        }
+                        enriched_sources.append(enriched_source)
+                    
+                    # Add the full content as a source as well, but only if we couldn't extract any real sources
+                    if content and not enriched_sources:
+                        # Try harder to extract actual sources from the content before falling back to Perplexity
+                        mentioned_sources = self._extract_all_mentioned_sources(content)
+                        
+                        if mentioned_sources:
+                            # If we found mentions of actual sources, add those instead of attributing to Perplexity
+                            for source_name in mentioned_sources[:3]:  # Limit to top 3 sources
+                                domain = source_name.lower().replace(" ", "")
+                                if "." not in domain:
+                                    domain = domain + ".com"
+                                
+                                reliability = self._determine_source_reliability(domain)
+                                enriched_sources.append({
+                                    "content": f"Information from {source_name}",
+                                    "source": source_name,
+                                    "reliability": reliability,
+                                    "url": f"https://www.google.com/search?q={source_name.replace(' ', '+')}"
+                                })
+                        else:
+                            # As a last resort, use Perplexity as the source
+                            enriched_sources.append({
+                                "content": content,
+                                "source": "aggregated sources",
+                                "reliability": "medium",
+                                "url": "https://perplexity.ai/"
+                            })
+                    
+                    logger.info(f"Enriched {len(enriched_sources)} sources with reliability information")
+                    return enriched_sources
+                    
+        except Exception as e:
+            logger.error(f"Error in Perplexity search: {str(e)}")
+            return {"error": str(e)}
+
+    async def _analyze_with_openai(self, query: str, perplexity_content: str) -> Dict[str, Any]:
+        """
+        Use OpenAI to parse and analyze the structured information from Perplexity.
+        
+        Args:
+            query: Original search query
+            perplexity_content: Raw content from Perplexity search
+            
+        Returns:
+            dict: Structured analysis results including fact checks and score
+        """
+        logger.info("Starting OpenAI parsing and analysis of Perplexity results")
+        try:
+            if not self.openai_api_key:
+                logger.warning("Skipping OpenAI analysis due to missing API key")
+                return {"error": "OpenAI API key not configured"}
+
+            headers = {
+                "Authorization": f"Bearer {self.openai_api_key}",
+                "Content-Type": "application/json"
+            }
+            
+            # Prepare the system prompt
+            system_prompt = """
+You are a fact-checking expert who analyzes text about images or news stories to determine authenticity.
+
+Your task is to parse the provided information (from a search service) into a structured format, and then analyze the authenticity of the subject.
+
+The search service has returned information in a semi-structured format with multiple articles and a summary.
+
+FIRST, extract all sources and their claims from the text.
+THEN, analyze these sources to determine the authenticity of the subject.
+
+Return your analysis as a structured JSON object with these fields:
+- "score": A number from 0 to 100 representing the authenticity score (0 = definitively false, 100 = definitively authentic, 50 = unclear)
+- "summary": A concise summary of your fact-check findings
+- "fact_checks": An array of fact check results, each containing:
+  - "title": A descriptive title for this fact check
+  - "source": The source domain or name of the news organization
+  - "url": The source URL (if mentioned)
+  - "description": A summary of what this source claims about the subject
+  - "rating": One of ["True", "Mostly True", "Partly True", "Unverified", "Partly False", "Mostly False", "False"]
+  - "reliability": The reliability of the source ("high", "medium", or "low")
+
+SCORING GUIDELINES:
+- If multiple reliable sources confirm the image is FAKE, MANIPULATED, or MISREPRESENTED, score BELOW 40.
+- If the image shows a real event but with false context, score between 20-35.
+- If the image is an AI-generated fake, score between 0-20.
+- If the image's authenticity is disputed or unclear, score around 50.
+- Only if the image is verified as authentic by reliable sources should the score be above 70.
+
+Be objective, thorough, and only draw conclusions supported by the provided information.
+"""
+            
+            # Create the user message with the query and perplexity content
+            user_message = f"""
+Here is information about this query: "{query}"
+
+This is the information I've gathered:
+
+{perplexity_content}
+
+Please parse this information into a structured format and analyze the authenticity of the subject.
+"""
+
+            payload = {
+                "model": "gpt-4o",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message}
+                ],
+                "response_format": {"type": "json_object"},
+                "temperature": 0.2
+            }
+            
+            logger.debug("Sending request to OpenAI API")
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.openai_api_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=30
+                ) as response:
+                    response_text = await response.text()
+                    logger.debug(f"OpenAI API response status: {response.status}")
+                    
+                    if response.status != 200:
+                        logger.error(f"OpenAI API error: {response.status} - {response_text[:500]}")
+                        return {"error": f"OpenAI API error: {response.status}"}
+                    
+                    try:
+                        result = json.loads(response_text)
+                        
+                        # Extract the analysis from the OpenAI response
+                        if "choices" in result and len(result["choices"]) > 0:
+                            content = result["choices"][0]["message"]["content"]
+                            try:
+                                analysis = json.loads(content)
+                                logger.info(f"OpenAI analysis completed with score: {analysis.get('score', 'unknown')}")
+                                return analysis
+                            except json.JSONDecodeError as json_err:
+                                logger.error(f"Failed to parse OpenAI response as JSON: {str(json_err)}")
+                                return {"error": "Invalid JSON in OpenAI response", "raw_content": content[:1000]}
+                        else:
+                            logger.error("Unexpected response format from OpenAI")
+                            return {"error": "Unexpected response format from OpenAI"}
+                    except Exception as e:
+                        logger.error(f"Error processing OpenAI response: {str(e)}")
+                        return {"error": f"Error processing OpenAI response: {str(e)}"}
+                    
+        except Exception as e:
+            logger.error(f"Error in OpenAI analysis: {str(e)}")
+            return {"error": str(e)}
+
+            payload = {
+                "model": "gpt-4o",
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message}
+                ],
+                "response_format": {"type": "json_object"},
+                "temperature": 0.2
+            }
+            
+            logger.debug("Sending request to OpenAI API")
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.openai_api_url,
+                    headers=headers,
+                    json=payload,
+                    timeout=30
+                ) as response:
+                    response_text = await response.text()
+                    logger.debug(f"OpenAI API response status: {response.status}")
+                    
+                    if response.status != 200:
+                        logger.error(f"OpenAI API error: {response.status} - {response_text[:500]}")
+                        return {"error": f"OpenAI API error: {response.status}"}
+                    
+                    result = json.loads(response_text)
+                    
+                    # Extract the analysis from the OpenAI response
+                    if "choices" in result and len(result["choices"]) > 0:
+                        content = result["choices"][0]["message"]["content"]
+                        try:
+                            analysis = json.loads(content)
+                            logger.info(f"OpenAI analysis completed with score: {analysis.get('score', 'unknown')}")
+                            return analysis
+                        except json.JSONDecodeError as json_err:
+                            logger.error(f"Failed to parse OpenAI response as JSON: {str(json_err)}")
+                            return {"error": "Invalid JSON in OpenAI response", "raw_content": content[:1000]}
+                    else:
+                        logger.error("Unexpected response format from OpenAI")
+                        return {"error": "Unexpected response format from OpenAI"}
+                    
+        except Exception as e:
+            logger.error(f"Error in OpenAI analysis: {str(e)}")
+            return {"error": str(e)}
+
+    def _extract_urls_from_text(self, text: str) -> List[str]:
+        """Extract URLs from text content"""
+        url_pattern = r'https?://[^\s)"]+'
+        return re.findall(url_pattern, text)
+
+    def _extract_citations_from_content(self, content, url="https://perplexity.ai/search"):
+        """Extract citations from the content text itself"""
+        # Start with a generic source, but we'll try to find a better one
+        citation_source = "aggregated sources"
+        citation_reliability = "medium"
+        
+        # Clean the content text
+        content_text = content[:800] + "..." if len(content) > 800 else content
+        
+        # Try to extract actual sources from content
+        mentioned_sources = self._extract_all_mentioned_sources(content)
+        
+        # Use the first mentioned source if available
+        if mentioned_sources:
+            citation_source = mentioned_sources[0]
+            logger.debug(f"Extracted source from content: {citation_source}")
+            # Determine reliability of extracted source
+            for tier, domains in self.reliability_tiers.items():
+                if any(trusted_domain.lower() in citation_source.lower() for trusted_domain in domains):
+                    citation_reliability = tier
+                    logger.debug(f"Source {citation_source} matched reliability tier: {tier}")
+                    break
+        
+        # Create the citation with the best source attribution
+        citation = {
+            "url": url,
+            "title": "Analysis from " + (citation_source if citation_source != "aggregated sources" else "multiple sources"),
+            "source": citation_source,
+            "snippet": content_text,
+            "reliability": citation_reliability
+        }
+        
+        return citation
+        
+    def _extract_all_mentioned_sources(self, content):
+        """Extract all mentioned sources from content text"""
+        mentioned_sources = []
+        
+        # Look for source attributions with various indicators
+        source_indicators = ["according to", "reported by", "from", "source:", "by", "published in", "article in"]
+        
+        for indicator in source_indicators:
+            pattern = f"{indicator} ([A-Za-z0-9 ]+)"
+            matches = re.findall(pattern, content, re.IGNORECASE)
+            for match in matches:
+                if len(match) > 3 and len(match) < 30:  # Reasonable source name length
+                    mentioned_sources.append(match.strip())
+        
+        # Extract any media outlet names that might be mentioned
+        media_outlets = [
+            "Reuters", "Associated Press", "AP", "BBC", "CNN", 
+            "New York Times", "NY Times", "Washington Post", "The Guardian", 
+            "Snopes", "FactCheck.org", "PolitiFact", "NBC", "CBS", 
+            "ABC News", "Fox News", "NPR", "USA Today", "Wall Street Journal",
+            "The Telegraph", "The Times", "Daily Mail", "The Sun", "The Independent",
+            "The Atlantic", "NBC News", "CBS News", "ABC"
+        ]
+        
+        for outlet in media_outlets:
+            # Use more precise pattern matching to avoid false positives
+            pattern = r'\b' + re.escape(outlet) + r'\b'
+            if re.search(pattern, content, re.IGNORECASE):
+                mentioned_sources.append(outlet)
+        
+        # Remove duplicates while preserving order
+        return list(dict.fromkeys(mentioned_sources))
+
+    def _calculate_reliability_score(self, fact_checks: List[Dict[str, Any]]) -> float:
+        """
+        Calculate overall reliability score based on found fact-checks.
+        This function integrates the original scoring logic but works with our new format.
+        
+        Args:
+            fact_checks: List of extracted fact-checks
+            
+        Returns:
+            float: Reliability score (0-100)
+        """
+        logger.info("Calculating reliability score based on fact-checks")
+        if not fact_checks:
+            logger.warning("No fact-checks found, returning neutral score of 50.0")
+            return 50.0
+        
+        # Start with a neutral score
+        score = 50.0
+        fact_check_count = len(fact_checks)
+        logger.debug(f"Fact-check count: {fact_check_count}")
+        
+        # Add points if multiple fact-checks
+        if fact_check_count > 1:
+            additional_points = min(fact_check_count * 5, 15)
+            score += additional_points
+            logger.debug(f"Added {additional_points} points for multiple fact-checks")
+        
+        # Count reliability tiers
+        high_reliability_count = sum(1 for fc in fact_checks if fc.get("reliability") == "high")
+        medium_reliability_count = sum(1 for fc in fact_checks if fc.get("reliability") == "medium")
+        
+        logger.debug(f"High reliability count: {high_reliability_count}")
+        logger.debug(f"Medium reliability count: {medium_reliability_count}")
+        
+        # Add points for high reliability sources
+        if high_reliability_count > 0:
+            additional_points = min(high_reliability_count * 10, 20)
+            score += additional_points
+            logger.debug(f"Added {additional_points} points for high reliability sources")
+        
+        # Add points for medium reliability sources
+        if medium_reliability_count > 0:
+            additional_points = min(medium_reliability_count * 5, 10)
+            score += additional_points
+            logger.debug(f"Added {additional_points} points for medium reliability sources")
+        
+        # Adjust score based on rating prevalence
+        true_count = sum(1 for fc in fact_checks if fc.get("rating") == "True")
+        mostly_true_count = sum(1 for fc in fact_checks if fc.get("rating") == "Mostly True")
+        false_count = sum(1 for fc in fact_checks if fc.get("rating") == "False")
+        mostly_false_count = sum(1 for fc in fact_checks if fc.get("rating") == "Mostly False")
+        mixed_count = sum(1 for fc in fact_checks if fc.get("rating") in ["Partly True", "Partly False"])
+        
+        logger.debug(f"Rating counts - True: {true_count}, Mostly True: {mostly_true_count}, " 
+                   f"False: {false_count}, Mostly False: {mostly_false_count}, Mixed: {mixed_count}")
+        
+        # Calculate a consensus based on the ratings
+        true_total = true_count + mostly_true_count
+        false_total = false_count + mostly_false_count
+        
+        if true_total > false_total + mixed_count:
+            score += 15
+            logger.debug("Consensus 'True' detected, added 15 points")
+        elif false_total > true_total + mixed_count:
+            score -= 15
+            logger.debug("Consensus 'False' detected, subtracted 15 points")
+        elif mixed_count > true_total + false_total:
+            score -= 5
+            logger.debug("Mixed results detected, subtracted 5 points")
+        
+        # Special case: If any highly reliable source says it's false, penalize more
+        if any(fc.get("reliability") == "high" and fc.get("rating") in ["False", "Mostly False"] for fc in fact_checks):
+            score -= 20
+            logger.debug("High reliability source says false, subtracted 20 points")
+        
+        # Cap the score
+        final_score = max(0, min(100, score))
+        logger.info(f"Final reliability score: {final_score}")
+        return final_score
+
+    def _determine_source_reliability(self, domain: str) -> str:
+        """
+        Determine the reliability of a source based on domain.
+        
+        Args:
+            domain: Website domain
+            
+        Returns:
+            str: Reliability tier ('high', 'medium', or 'low')
+        """
+        for tier, domains in self.reliability_tiers.items():
+            if any(trusted_domain in domain.lower() for trusted_domain in domains):
+                return tier
+        
+        return "low"
+
+    def _extract_domain(self, url: str) -> str:
+        """
+        Extract domain from URL.
+        """
+        try:
+            parsed_url = urlparse(url)
+            domain = parsed_url.netloc
+            if domain.startswith('www.'):
+                domain = domain[4:]
+            return domain
+        except Exception as e:
+            logger.error(f"Error extracting domain: {str(e)}")
+            return url
 
     def _create_generic_info_sources(self, context: str) -> List[Dict[str, Any]]:
         """
@@ -186,512 +759,3 @@ class FactChecker:
                 "reliability": "high"
             }
         ]
-
-    async def _search_sonar(self, query: str) -> List[Dict[str, Any]]:
-        """
-        Search using Perplexity Sonar API, requesting reputable and reliable sources.
-
-        Args:
-            query: Search query string
-            
-        Returns:
-            list: Search results (citations) from Perplexity
-        """
-        logger.info("Performing search with query: %s", query)
-        try:
-            # Debug the API key presence
-            logger.info("Using API key: %s", self.api_key[:4] + "..." if self.api_key and len(self.api_key) > 8 else "Missing or invalid")
-            
-            # Return empty results if no API key
-            if not self.api_key or self.api_key == "your_perplexity_api_key_here":
-                logger.warning("Skipping search due to missing API key")
-                return []
-
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json"
-            }
-
-            # Try with a simplified prompt that focuses on getting factual information
-            payload = {
-                "model": "sonar",
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a factual research assistant that provides information from reliable web sources. "
-                            "Return information and citations about the query. "
-                            "Focus primarily on trusted news sites and fact-checking organizations."
-                        )
-                    },
-                    {
-                        "role": "user",
-                        "content": f"Find factual information about: {query}"
-                    }
-                ],
-                "options": {
-                    "search_focus": "internet"
-                },
-                "max_tokens": 1000
-            }
-            
-            async with aiohttp.ClientSession() as session:
-                try:
-                    # Log the full request for debugging
-                    logger.info("Sending request to Perplexity API with payload: %s", json.dumps(payload))
-                    
-                    async with session.post(
-                        self.api_url,
-                        headers=headers,
-                        json=payload,
-                        timeout=15  # Add a reasonable timeout
-                    ) as response:
-                        response_text = await response.text()
-                        logger.info("Raw API Response status: %d, Content length: %d", 
-                                     response.status, len(response_text))
-                        
-                        if response.status != 200:
-                            logger.error("Perplexity API error: %d - %s", response.status, response_text[:500])
-                            return []
-                        
-                        try:
-                            result = json.loads(response_text)
-                            # Log more details about the response structure
-                            logger.info("Response keys: %s", list(result.keys()) if isinstance(result, dict) else "Not a dict")
-                            if isinstance(result, dict) and "choices" in result:
-                                logger.info("Found %d choices", len(result["choices"]))
-                        except json.JSONDecodeError:
-                            logger.error("Failed to parse JSON response: %s", response_text[:500])
-                            return []
-                        
-                        # Extract citations from the first choice's message
-                        citations = []
-                        
-                        # New extraction method - parse directly from content
-                        if isinstance(result, dict) and "choices" in result:
-                            for choice in result["choices"]:
-                                msg = choice.get("message", {})
-                                content = msg.get("content", "")
-                                
-                                # Try all citation methods
-                                if msg.get("citations"):
-                                    logger.info("Found citations in 'citations' field")
-                                    citations.extend(msg["citations"])
-                                elif msg.get("content_citations"):
-                                    logger.info("Found citations in 'content_citations' field")
-                                    citations.extend(msg["content_citations"])
-                                elif "links" in content.lower() or "source" in content.lower() or "http" in content.lower():
-                                    # Extract information from the text itself
-                                    logger.info("Extracting citations from content text")
-                                    # Extract URLs from content
-                                    urls = self._extract_urls_from_text(content)
-                                    
-                                    # Extract sections that might be citations
-                                    lines = content.split('\n')
-                                    for i, line in enumerate(lines):
-                                        if "http" in line:
-                                            title = lines[i-1] if i > 0 else ""
-                                            url = self._extract_urls_from_text(line)[0] if self._extract_urls_from_text(line) else ""
-                                            if url:
-                                                citations.append({
-                                                    "url": url,
-                                                    "title": title.strip() or f"Source from {self._extract_domain(url)}",
-                                                    "snippet": line.strip()
-                                                })
-                                    
-                                    # If we still have URLs not associated with citations, add them
-                                    existing_urls = [c["url"] for c in citations if "url" in c]
-                                    for url in urls:
-                                        if url not in existing_urls:
-                                            citations.append({
-                                                "url": url,
-                                                "title": f"Source: {self._extract_domain(url)}",
-                                                "snippet": "Source mentioned in content"
-                                            })
-                                else:
-                                    logger.info("No citations found in message content")
-                        
-                        # If still no citations, try a generic search for fact-checking sites
-                        if not citations and isinstance(result, dict) and result.get("choices"):
-                            logger.info("Creating citations from content directly")
-                            # Extract text from the first choice
-                            content = result["choices"][0].get("message", {}).get("content", "")
-                            if content:
-                                # Create a citation using our dedicated extraction method
-                                citation = self._extract_citations_from_content(content)
-                                citations.append(citation)
-                        
-                        logger.info("Extracted %d citations", len(citations))
-                        return citations
-                except aiohttp.ClientError as e:
-                    logger.error("HTTP connection error: %s", str(e))
-                    return []
-                    
-        except Exception as e:
-            logger.error("Perplexity API search error: %s", str(e))
-            
-            # Try a direct search to fact-checking sites as a fallback
-            try:
-                logger.info("Attempting direct fact check site search as fallback")
-                return self._direct_search_fallback(query)
-            except Exception as fallback_error:
-                logger.error("Fallback search also failed: %s", str(fallback_error))
-                return []
-                
-    def _direct_search_fallback(self, query: str) -> List[Dict[str, Any]]:
-        """Fallback method to create citations for known fact-checking sites"""
-        # Extract key terms for a targeted search
-        key_terms = self._extract_key_terms(query)
-        
-        # Create direct links to fact-checking site searches
-        return [
-            {
-                "url": f"https://www.snopes.com/?s={key_terms.replace(' ', '+')}",
-                "title": f"Snopes Search Results for {key_terms}",
-                "snippet": "Snopes is a fact-checking website that researches and rates the accuracy of rumors, viral content, and other claims.",
-                "source": "snopes.com"
-            },
-            {
-                "url": f"https://www.factcheck.org/?s={key_terms.replace(' ', '+')}",
-                "title": f"FactCheck.org Search Results for {key_terms}",
-                "snippet": "FactCheck.org is a nonpartisan, nonprofit consumer advocate for voters that aims to reduce the level of deception in politics.",
-                "source": "factcheck.org"
-            },
-            {
-                "url": f"https://www.reuters.com/fact-check/",
-                "title": "Reuters Fact Check",
-                "snippet": "Reuters Fact Check is a fact-checking initiative that investigates social media posts and viral content for misinformation.",
-                "source": "reuters.com"
-            }
-        ]
-
-    def _extract_urls_from_text(self, text: str) -> List[str]:
-        """Extract URLs from text content"""
-        # Simple URL pattern
-        url_pattern = r'https?://[^\s)"]+'
-        return re.findall(url_pattern, text)
-
-    def _extract_fact_checks(self, search_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """
-        Extract fact-check information from search results.
-
-        Args:
-            search_results: List of search results (citations)
-            
-        Returns:
-            list: Extracted fact-checks with standardized format
-        """
-        logger.info("Extracting fact-checks from search results")
-        fact_checks = []
-        
-        # Skip processing if no results
-        if not search_results:
-            return fact_checks
-        
-        for result in search_results:
-            try:
-                # Handle missing fields gracefully
-                url = result.get("url", "")
-                if not url:
-                    logger.debug("Skipping result with no URL")
-                    continue
-
-                title = result.get("title", "")
-                snippet = result.get("snippet", "") or result.get("description", "")
-                source = result.get("source", self._extract_domain(url))
-                reliability = result.get("reliability", None)
-                rating = result.get("rating", None)
-                
-                # Skip if missing essential info
-                if not (url and (title or snippet)):
-                    logger.debug("Skipping result due to missing information")
-                    continue
-                
-                # If source and reliability are already provided, use them directly
-                if source and reliability and rating:
-                    fact_check = {
-                        "title": title,
-                        "url": url,
-                        "source": source,
-                        "description": snippet,
-                        "rating": rating,
-                        "reliability": reliability
-                    }
-                    fact_checks.append(fact_check)
-                    logger.debug("Used pre-processed fact-check with source %s", source)
-                    continue
-                
-                # Otherwise extract from URL
-                domain = self._extract_domain(url)
-                
-                # Determine if this is likely a fact-check
-                text_lower = f"{title.lower()} {snippet.lower()} {url.lower()}"
-                is_likely_fact_check = any(term in text_lower for term in [
-                    "fact check", "fact-check", "debunk", "verify", "verified", 
-                    "false", "true", "misleading", "fake", "authentic",
-                    "misinformation", "disinformation", "hoax", "rumor", "claim"
-                ])
-                known_fact_checkers = [
-                    "politifact.com", "factcheck.org", "snopes.com", "fullfact.org",
-                    "poynter.org", "truthorfiction.com", "apnews.com/hub/ap-fact-check"
-                ]
-                is_known_fact_checker = any(checker in domain for checker in known_fact_checkers)
-
-                if is_likely_fact_check or is_known_fact_checker:
-                    rating = self._extract_rating(title, snippet)
-                    reliability = self._determine_source_reliability(domain)
-                    
-                    fact_check = {
-                        "title": title,
-                        "url": url,
-                        "source": domain,
-                        "description": snippet,
-                        "rating": rating,
-                        "reliability": reliability
-                    }
-                    fact_checks.append(fact_check)
-                    logger.debug("Extracted fact-check: %s", domain)
-                else:
-                    logger.debug("Result is not a clear fact-check: %s", domain)
-                
-            except Exception as e:
-                logger.error("Error extracting fact-check: %s", str(e))
-                continue
-
-        if not fact_checks and search_results:
-            logger.info("No fact-checks found, using generic extraction for top results")
-            try:
-                # Take top 3 results as generic information sources
-                for result in search_results[:3]:
-                    url = result.get("url", "")
-                    title = result.get("title", "")
-                    snippet = result.get("snippet", "") or result.get("description", "")
-                    source = result.get("source", self._extract_domain(url))
-                    reliability = result.get("reliability", None)
-                    
-                    if not (url and (title or snippet)):
-                        continue
-                    
-                    if not reliability:
-                        domain = self._extract_domain(url)
-                        reliability = self._determine_source_reliability(domain)
-                    
-                    fact_check = {
-                        "title": title,
-                        "url": url,
-                        "source": source,
-                        "description": snippet,
-                        "rating": "Information Source",
-                        "reliability": reliability
-                    }
-                    fact_checks.append(fact_check)
-                    logger.debug("Added generic information source: %s", url)
-            except Exception as e:
-                logger.error("Error during generic extraction: %s", str(e))
-        
-        # Sort so higher reliability appears first
-        fact_checks.sort(key=lambda x: 
-            0 if x["reliability"] == "high" else 
-            1 if x["reliability"] == "medium" else 2
-        )
-        
-        logger.info("Total fact-checks after extraction: %d", len(fact_checks))
-        return fact_checks
-
-    def _extract_citations_from_content(self, content, url="https://perplexity.ai/search"):
-        """Extract citations from the content text itself"""
-        citation_source = "perplexity.ai"
-        citation_reliability = "medium"  # Default Perplexity to medium
-        
-        # Clean the content text
-        content_text = content[:500] + "..." if len(content) > 500 else content
-        
-        # Try to extract actual sources from content
-        mentioned_sources = []
-        source_indicators = ["according to", "reported by", "from", "source:", "by"]
-        
-        # Look for source attributions in the content
-        for indicator in source_indicators:
-            pattern = f"{indicator} ([A-Za-z0-9 ]+)"
-            matches = re.findall(pattern, content, re.IGNORECASE)
-            for match in matches:
-                if len(match) > 3 and len(match) < 30:  # Reasonable source name length
-                    mentioned_sources.append(match.strip())
-        
-        # Extract any media outlet names that might be mentioned
-        media_outlets = [
-            "Reuters", "Associated Press", "AP", "BBC", "CNN", 
-            "New York Times", "Washington Post", "The Guardian", 
-            "Snopes", "FactCheck.org", "PolitiFact", "NBC", "CBS", 
-            "ABC News", "Fox News", "NPR", "USA Today", "Wall Street Journal"
-        ]
-        
-        for outlet in media_outlets:
-            if outlet.lower() in content.lower():
-                mentioned_sources.append(outlet)
-        
-        # Use the first mentioned source if available
-        if mentioned_sources:
-            citation_source = mentioned_sources[0]
-            logger.info("Extracted source from content: %s", citation_source)
-            # Determine reliability of extracted source
-            for tier, domains in self.reliability_tiers.items():
-                if any(trusted_domain.lower() in citation_source.lower() for trusted_domain in domains):
-                    citation_reliability = tier
-                    logger.info("Source %s matched reliability tier: %s", citation_source, tier)
-                    break
-        else:
-            logger.info("No sources mentioned in content, using default perplexity.ai with medium reliability")
-        
-        # If we found Instagram as a source (common for social media posts)
-        if "instagram" in content.lower():
-            citation_source = "Instagram (original content)"
-            citation_reliability = "medium"  # Direct sources are medium reliability
-            logger.info("Found Instagram mention in content, using as source")
-        
-        # Create the citation with the best source attribution
-        citation = {
-            "url": url,
-            "title": "Analysis of query results",
-            "source": citation_source,
-            "snippet": content_text,
-            "rating": "Information Source",
-            "reliability": citation_reliability
-        }
-        
-        logger.info("Created citation with source=%s, reliability=%s", citation_source, citation_reliability)
-        return citation
-
-    def _extract_rating(self, title: str, snippet: str) -> str:
-        """
-        Try to detect the rating from the text.
-        """
-        text = f"{title.lower()} {snippet.lower()}"
-        
-        # More comprehensive patterns for different rating classifications
-        rating_patterns = {
-            "False": r'\b(false|fake|hoax|misinformation|debunked|untrue|incorrect|fabricated)\b',
-            "True": r'\b(true|accurate|correct|legitimate|verified|confirmed|authentic|real)\b',
-            "Partly false": r'\b(partially false|half-true|half-truth|misleading|mixed|mostly false|exaggerat|out of context|need context|lacks context)\b',
-            "Partly true": r'\b(partly true|partially true|mostly true|slightly misrepresented)\b',
-            "Unverified": r'\b(unverified|unsubstantiated|unproven|disputed|questioned|unclear|not confirmed)\b',
-            "Outdated": r'\b(outdated|old news|no longer true|superseded|dated|former)\b'
-        }
-        
-        # Check for matches in order of decreasing specificity
-        for rating, pattern in rating_patterns.items():
-            if re.search(pattern, text):
-                return rating
-        
-        # Special cases for common fact-checking language that doesn't fit the patterns
-        if "pants on fire" in text:
-            return "False"
-        if "pinocchio" in text and "four" in text:
-            return "False"
-        if "pinocchio" in text and "one" in text:
-            return "Partly false"
-        
-        return "Unrated"
-
-    def _determine_source_reliability(self, domain: str) -> str:
-        """
-        Determine the reliability of a source based on domain.
-
-        Args:
-            domain: Website domain
-            
-        Returns:
-            str: Reliability tier ('high', 'medium', or 'low')
-        """
-        logger.debug("Determining reliability for domain: %s", domain)
-        for tier, domains in self.reliability_tiers.items():
-            if any(trusted_domain in domain for trusted_domain in domains):
-                logger.debug("Domain %s determined as %s reliability", domain, tier)
-                return tier
-        
-        logger.debug("Domain %s defaulted to low reliability", domain)
-        return "low"
-
-    def _extract_domain(self, url: str) -> str:
-        """
-        Extract domain from URL.
-        """
-        logger.debug("Extracting domain from URL: %s", url)
-        try:
-            parsed_url = urlparse(url)
-            domain = parsed_url.netloc
-            if domain.startswith('www.'):
-                domain = domain[4:]
-            logger.debug("Extracted domain: %s", domain)
-            return domain
-        except Exception as e:
-            logger.error("Error extracting domain: %s", str(e))
-            return url
-
-    def _calculate_reliability_score(self, fact_checks: List[Dict[str, Any]]) -> float:
-        """
-        Calculate overall reliability score based on found fact-checks.
-        
-        Args:
-            fact_checks: List of extracted fact-checks
-            
-        Returns:
-            float: Reliability score (0-100)
-        """
-        logger.info("Calculating reliability score based on fact-checks")
-        if not fact_checks:
-            logger.warning("No fact-checks found, returning neutral score of 50.0")
-            return 50.0
-        
-        # Debug the fact check source and reliability for easier troubleshooting
-        for fc in fact_checks:
-            logger.info("Fact check from source: %s with reliability: %s", 
-                      fc.get("source", "unknown"), fc.get("reliability", "unknown"))
-        
-        score = 50.0
-        fact_check_count = len(fact_checks)
-        logger.debug("Fact-check count: %d", fact_check_count)
-        
-        # Add points if multiple fact-checks
-        if fact_check_count > 1:
-            additional_points = min(fact_check_count * 5, 15)
-            score += additional_points
-            logger.debug("Added %d points for multiple fact-checks", additional_points)
-        
-        # Add points if we have high reliability sources
-        high_reliability_count = sum(1 for fc in fact_checks if fc.get("reliability") == "high")
-        logger.debug("High reliability count: %d", high_reliability_count)
-        if high_reliability_count > 0:
-            additional_points = min(high_reliability_count * 10, 20)
-            score += additional_points
-            logger.debug("Added %d points for high reliability sources", additional_points)
-        
-        # Add points for medium reliability sources (new)
-        medium_reliability_count = sum(1 for fc in fact_checks if fc.get("reliability") == "medium")
-        logger.debug("Medium reliability count: %d", medium_reliability_count)
-        if medium_reliability_count > 0:
-            additional_points = min(medium_reliability_count * 5, 10)
-            score += additional_points
-            logger.debug("Added %d points for medium reliability sources", additional_points)
-        
-        # Adjust score based on rating prevalence
-        true_count = sum(1 for fc in fact_checks if fc.get("rating") == "True")
-        false_count = sum(1 for fc in fact_checks if fc.get("rating") == "False")
-        mixed_count = sum(1 for fc in fact_checks if fc.get("rating") == "Partly false")
-        
-        logger.debug("Rating counts - True: %d, False: %d, Mixed: %d", true_count, false_count, mixed_count)
-        
-        if true_count > false_count + mixed_count:
-            score += 15
-            logger.debug("Consensus 'True' detected, added 15 points")
-        elif false_count > true_count + mixed_count:
-            score -= 15
-            logger.debug("Consensus 'False' detected, subtracted 15 points")
-        elif mixed_count > true_count + false_count:
-            score -= 5
-            logger.debug("Mixed results detected, subtracted 5 points")
-        
-        final_score = max(0, min(100, score))
-        logger.info("Final reliability score: %f", final_score)
-        return final_score
