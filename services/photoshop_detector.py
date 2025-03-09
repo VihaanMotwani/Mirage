@@ -115,6 +115,8 @@ class PhotoshopDetector:
         often indicate manipulation.
         """
         try:
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
             # Quality level for ELA
             quality = 90
             
@@ -460,6 +462,8 @@ class PhotoshopDetector:
         JPEG image with different compression parameters.
         """
         try:
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
             # Save original image at multiple JPEG qualities
             qualities = [65, 75, 85, 95]
             ghosts = []

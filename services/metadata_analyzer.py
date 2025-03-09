@@ -6,6 +6,7 @@ import datetime
 import hashlib
 import logging
 from PIL import Image
+from PIL.ExifTags import TAGS 
 from sklearn.ensemble import IsolationForest
 
 logger = logging.getLogger(__name__)
@@ -56,7 +57,7 @@ class MetadataAnalyzer:
             
             if exif:
                 for tag_id, value in exif.items():
-                    tag = exifread.TAGS.get(tag_id, tag_id)
+                    tag = TAGS.get(tag_id, tag_id)  
                     exif_tags[tag] = str(value)
             
             # Get more detailed EXIF with exifread
@@ -77,10 +78,10 @@ class MetadataAnalyzer:
             if len(normalized_features) > 0:
                 # Reshape for sklearn (expects 2D array)
                 X = np.array([list(normalized_features.values())]).reshape(1, -1)
+                if not hasattr(self.anomaly_detector, "estimators_"):
+                    self.anomaly_detector.fit(X)
                 anomaly_scores = self.anomaly_detector.decision_function(X)
-                is_anomaly = anomaly_scores[0] < 0  # Negative score indicates anomaly
-            else:
-                is_anomaly = True  # Consider lack of metadata as anomaly
+                is_anomaly = bool(anomaly_scores[0] < 0)
             
             # Check for specific suspicious patterns
             anomalies = self._check_suspicious_patterns(detailed_exif)
