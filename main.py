@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Image Verification API")
 
 # Get CORS settings from environment variables
-cors_origins_str = os.getenv("CORS_ORIGINS", "http://localhost:3000")
+cors_origins_str = os.getenv("CORS_ORIGINS", "http://localhost:3000", "https://mirage-image.app")
 cors_origins = [origin.strip() for origin in cors_origins_str.split(",")]
 
 # Configure CORS
