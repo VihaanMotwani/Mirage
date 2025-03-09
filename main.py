@@ -130,7 +130,8 @@ async def verify_image(
                     logger.info("Image processed from URL")
         
         if not image_url:
-            img_url = upload_and_get_url(image)
+            print(img)
+            img_url = await upload_and_get_url(img)
         else:
             img_url = image_url
 

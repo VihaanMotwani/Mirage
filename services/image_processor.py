@@ -1,3 +1,6 @@
+# CLOUDINARY_URL=f"cloudinary://{api_key}:{api_secret}@{cloud_name}"
+# upload_preset = os.getenv("CLOUDINARY_UPLOAD_PRESET", "your_unsigned_upload_preset")
+
 from PIL import Image
 import io
 import numpy as np
@@ -5,46 +8,80 @@ import cv2
 import logging
 import aiohttp
 import os
+import asyncio
+import cloudinary
+
+# Get Cloudinary credentials from environment variables
+cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME")
+api_key = os.getenv("CLOUDINARY_API_KEY")
+api_secret = os.getenv("CLOUDINARY_API_SECRET")
+
+# Configure Cloudinary with credentials
+cloudinary.config(
+    cloud_name=cloud_name,
+    api_key=api_key,
+    api_secret=api_secret
+)
+
+import cloudinary.uploader
+import cloudinary.api
+import time
+from cloudinary import CloudinaryImage
 
 logger = logging.getLogger(__name__)
 
-cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME", "your_cloud_name")
-upload_preset = os.getenv("CLOUDINARY_UPLOAD_PRESET", "your_unsigned_upload_preset")
-
 async def upload_and_get_url(img):
     """
-    Uploads a PIL image to Cloudinary using an unsigned upload preset and returns the image URL.
+    Uploads a PIL image to Cloudinary using the official SDK and returns the image URL.
+    
+    Args:
+        img: PIL Image object
+    
+    Returns:
+        str: Secure URL of the uploaded image, or None if upload fails
     """
     try:
+        # Convert PIL Image to bytes
         img_format = getattr(img, 'format', 'JPEG')
         if img_format.upper() not in ['PNG', 'JPG', 'JPEG', 'WEBP']:
             img_format = 'JPEG'
+        
         img_byte_arr = io.BytesIO()
         img.save(img_byte_arr, format=img_format)
         img_bytes = img_byte_arr.getvalue()
         
-        upload_url = f"https://api.cloudinary.com/v1_1/{cloud_name}/upload"
+        # Generate a unique public ID based on timestamp
+        timestamp = int(time.time())
+        public_id = f"verification_{timestamp}"
         
-        data = aiohttp.FormData()
-        data.add_field("file",
-                    img_bytes,
-                    filename="image." + img_format.lower(),
-                    content_type="image/" + img_format.lower())
-        data.add_field("upload_preset", upload_preset)
+        logger.info(f"Uploading image to Cloudinary with public_id: {public_id}")
         
-        async with aiohttp.ClientSession() as session:
-            async with session.post(upload_url, data=data) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    link = result.get("secure_url")
-                    logger.info("Image uploaded successfully to Cloudinary: %s", link)
-                    return link
-                else:
-                    error_message = await resp.text()
-                    logger.error("Cloudinary upload failed with status %d: %s", resp.status, error_message)
-                    return None
+        # Use a thread executor to run the synchronous Cloudinary upload in an async context
+        loop = asyncio.get_event_loop()
+        upload_result = await loop.run_in_executor(
+            None,
+            lambda: cloudinary.uploader.upload(
+                img_bytes,
+                folder="verification_images",       # Folder to store images
+                public_id=public_id,                # Custom ID for the image
+                overwrite=True,                     # Overwrite if exists
+                notification_url=None,              # Optional notification URL
+                resource_type="image"               # Specify resource type as image
+            )
+        )
+        
+        # Get the secure URL from the response
+        secure_url = upload_result.get('secure_url')
+        
+        if secure_url:
+            logger.info(f"Image uploaded successfully to Cloudinary: {secure_url}")
+            return secure_url
+        else:
+            logger.error("No secure URL in Cloudinary response")
+            return None
+            
     except Exception as e:
-        logger.error("Error uploading image to Cloudinary: %s", str(e))
+        logger.error(f"Error uploading image to Cloudinary: {str(e)}")
         return None
 
 class ImageProcessor:
