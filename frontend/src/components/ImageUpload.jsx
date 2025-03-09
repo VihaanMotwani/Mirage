@@ -128,11 +128,6 @@ export default function ImageUpload({ onImageSubmit }) {
 
   return (
     <div className="w-full max-w-2xl mx-auto bg-white p-8 rounded-lg shadow-md mb-12">
-      <div className="mb-6">
-        <h2 className="text-2xl font-bold text-center mb-1">ImageTruth</h2>
-        <p className="text-center text-gray-600 text-sm">AI-Powered Explainable Image Verification</p>
-      </div>
-      
       <div className="flex space-x-4 mb-6">
         <button
           className={`flex-1 py-3 rounded-md flex items-center justify-center gap-2 transition-all ${
@@ -218,7 +213,7 @@ export default function ImageUpload({ onImageSubmit }) {
                 placeholder="Paste image URL here"
                 value={imageUrl}
                 onChange={handleUrlChange}
-                className="flex-1 p-3 outline-none"
+                className="flex-1 p-3 outline-none text-black"
               />
               <button 
                 type="button"
