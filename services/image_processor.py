@@ -1,6 +1,3 @@
-# CLOUDINARY_URL=f"cloudinary://{api_key}:{api_secret}@{cloud_name}"
-# upload_preset = os.getenv("CLOUDINARY_UPLOAD_PRESET", "your_unsigned_upload_preset")
-
 from PIL import Image
 import io
 import numpy as np
