@@ -128,7 +128,7 @@ class FactChecker:
                     "score": score,
                     "related_fact_checks": fact_checks,
                     "analysis_summary": analysis_results.get("summary", ""),
-                    "search_query": search_query
+                    "search_query": search_query,
                 }
             except Exception as e:
                 logger.error(f"Error extracting results from OpenAI analysis: {str(e)}")
@@ -435,13 +435,15 @@ Return your analysis as a structured JSON object with these fields:
   - "rating": One of ["True", "Mostly True", "Partly True", "Unverified", "Partly False", "Mostly False", "False"]
   - "reliability": The reliability of the source ("high", "medium", or "low")
 
-SCORING GUIDELINES:
-- If multiple reliable sources confirm the image is FAKE, MANIPULATED, or MISREPRESENTED, score BELOW 40.
+VERY IMPORTANT SCORING GUIDELINES:
+- If ANY evidence indicates the image is FAKE, MANIPULATED, or MISREPRESENTED, the score MUST be BELOW 40.
+- If multiple reliable sources confirm the image is fake, the score should be 0-20.
 - If the image shows a real event but with false context, score between 20-35.
-- If the image is an AI-generated fake, score between 0-20.
+- If the image is an AI-generated fake, score between 0-15.
 - If the image's authenticity is disputed or unclear, score around 50.
-- Only if the image is verified as authentic by reliable sources should the score be above 70.
+- Only if the image is verified as authentic by reliable sources with NO contradicting claims should the score be above 70.
 
+You MUST be conservative in scoring - when in doubt about authenticity, score lower rather than higher.
 Be objective, thorough, and only draw conclusions supported by the provided information.
 """
             
@@ -455,56 +457,6 @@ This is the information I've gathered:
 
 Please parse this information into a structured format and analyze the authenticity of the subject.
 """
-
-            payload = {
-                "model": "gpt-4o",
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message}
-                ],
-                "response_format": {"type": "json_object"},
-                "temperature": 0.2
-            }
-            
-            logger.debug("Sending request to OpenAI API")
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    self.openai_api_url,
-                    headers=headers,
-                    json=payload,
-                    timeout=30
-                ) as response:
-                    response_text = await response.text()
-                    logger.debug(f"OpenAI API response status: {response.status}")
-                    
-                    if response.status != 200:
-                        logger.error(f"OpenAI API error: {response.status} - {response_text[:500]}")
-                        return {"error": f"OpenAI API error: {response.status}"}
-                    
-                    try:
-                        result = json.loads(response_text)
-                        
-                        # Extract the analysis from the OpenAI response
-                        if "choices" in result and len(result["choices"]) > 0:
-                            content = result["choices"][0]["message"]["content"]
-                            try:
-                                analysis = json.loads(content)
-                                logger.info(f"OpenAI analysis completed with score: {analysis.get('score', 'unknown')}")
-                                return analysis
-                            except json.JSONDecodeError as json_err:
-                                logger.error(f"Failed to parse OpenAI response as JSON: {str(json_err)}")
-                                return {"error": "Invalid JSON in OpenAI response", "raw_content": content[:1000]}
-                        else:
-                            logger.error("Unexpected response format from OpenAI")
-                            return {"error": "Unexpected response format from OpenAI"}
-                    except Exception as e:
-                        logger.error(f"Error processing OpenAI response: {str(e)}")
-                        return {"error": f"Error processing OpenAI response: {str(e)}"}
-                    
-        except Exception as e:
-            logger.error(f"Error in OpenAI analysis: {str(e)}")
-            return {"error": str(e)}
 
             payload = {
                 "model": "gpt-4o",
@@ -627,8 +579,7 @@ Please parse this information into a structured format and analyze the authentic
     def _calculate_reliability_score(self, fact_checks: List[Dict[str, Any]]) -> float:
         """
         Calculate overall reliability score based on found fact-checks.
-        This revised approach weights each fact-check individually based on its
-        reliability and adjusts the score so that negative ratings have a heavier impact.
+        This function integrates the original scoring logic but works with our new format.
         
         Args:
             fact_checks: List of extracted fact-checks
@@ -640,42 +591,90 @@ Please parse this information into a structured format and analyze the authentic
         if not fact_checks:
             logger.warning("No fact-checks found, returning neutral score of 50.0")
             return 50.0
-
-        score = 50.0  # Start with a neutral baseline
-
-        # Process each fact-check individually
-        for fc in fact_checks:
-            reliability = fc.get("reliability", "low")
-            rating = fc.get("rating", "Unverified")
-            
-            # Determine weight based on reliability tier:
-            # high = 3, medium = 2, low = 1
-            weight = {"high": 3, "medium": 2, "low": 1}.get(reliability, 1)
-            
-            if rating in ["True", "Mostly True"]:
-                # Positive evidence: add 2 points per weight unit
-                delta = weight * 2
-                score += delta
-                logger.debug(f"Added {delta} points for rating '{rating}' with {reliability} reliability")
-            elif rating in ["False", "Mostly False"]:
-                # Negative evidence: subtract 4 points per weight unit
-                delta = weight * 4
-                score -= delta
-                logger.debug(f"Subtracted {delta} points for rating '{rating}' with {reliability} reliability")
-            elif rating in ["Partly True", "Partly False"]:
-                # Partial evidence is adjusted slightly
-                if "True" in rating:
-                    delta = weight * 1
-                    score += delta
-                    logger.debug(f"Added {delta} points for partly true rating with {reliability} reliability")
-                else:
-                    delta = weight * 1
-                    score -= delta
-                    logger.debug(f"Subtracted {delta} points for partly false rating with {reliability} reliability")
-            else:
-                logger.debug(f"No adjustment for rating '{rating}'")
-
-        # Clamp the final score between 0 and 100
+        
+        # Start with a neutral score
+        score = 50.0
+        fact_check_count = len(fact_checks)
+        logger.debug(f"Fact-check count: {fact_check_count}")
+        
+        # First check: Is there any strong evidence the image is fake?
+        # If ANY high-reliability source has rated it as False or Mostly False, cap the score at 30
+        fake_ratings = ["False", "Mostly False"]
+        high_reliability_fake = any(
+            fc.get("reliability") == "high" and fc.get("rating") in fake_ratings 
+            for fc in fact_checks
+        )
+        
+        medium_reliability_fake_count = sum(
+            1 for fc in fact_checks 
+            if fc.get("reliability") == "medium" and fc.get("rating") in fake_ratings
+        )
+        
+        # If any high reliability source says it's fake OR multiple medium reliability sources agree it's fake
+        if high_reliability_fake or medium_reliability_fake_count >= 2:
+            logger.info("Strong evidence of fake image found, capping score at 30")
+            return min(30.0, score)  # Cap at 30 but allow lower scores
+        
+        # Proceed with regular scoring if no strong evidence of fake
+        
+        # Add points if multiple fact-checks
+        if fact_check_count > 1:
+            additional_points = min(fact_check_count * 5, 15)
+            score += additional_points
+            logger.debug(f"Added {additional_points} points for multiple fact-checks")
+        
+        # Count reliability tiers
+        high_reliability_count = sum(1 for fc in fact_checks if fc.get("reliability") == "high")
+        medium_reliability_count = sum(1 for fc in fact_checks if fc.get("reliability") == "medium")
+        
+        logger.debug(f"High reliability count: {high_reliability_count}")
+        logger.debug(f"Medium reliability count: {medium_reliability_count}")
+        
+        # Add points for high reliability sources
+        if high_reliability_count > 0:
+            additional_points = min(high_reliability_count * 10, 20)
+            score += additional_points
+            logger.debug(f"Added {additional_points} points for high reliability sources")
+        
+        # Add points for medium reliability sources
+        if medium_reliability_count > 0:
+            additional_points = min(medium_reliability_count * 5, 10)
+            score += additional_points
+            logger.debug(f"Added {additional_points} points for medium reliability sources")
+        
+        # Adjust score based on rating prevalence
+        true_count = sum(1 for fc in fact_checks if fc.get("rating") == "True")
+        mostly_true_count = sum(1 for fc in fact_checks if fc.get("rating") == "Mostly True")
+        false_count = sum(1 for fc in fact_checks if fc.get("rating") == "False")
+        mostly_false_count = sum(1 for fc in fact_checks if fc.get("rating") == "Mostly False")
+        mixed_count = sum(1 for fc in fact_checks if fc.get("rating") in ["Partly True", "Partly False"])
+        
+        logger.debug(f"Rating counts - True: {true_count}, Mostly True: {mostly_true_count}, " 
+                   f"False: {false_count}, Mostly False: {mostly_false_count}, Mixed: {mixed_count}")
+        
+        # Calculate a consensus based on the ratings
+        true_total = true_count + mostly_true_count
+        false_total = false_count + mostly_false_count
+        
+        if true_total > false_total + mixed_count:
+            score += 15
+            logger.debug("Consensus 'True' detected, added 15 points")
+        elif false_total > true_total + mixed_count:
+            score -= 25  # Increased penalty for false consensus
+            logger.debug("Consensus 'False' detected, subtracted 25 points")
+            # Additional cap for false consensus
+            score = min(40, score)
+            logger.debug("Applied score cap of 40 due to false consensus")
+        elif mixed_count > true_total + false_total:
+            score -= 5
+            logger.debug("Mixed results detected, subtracted 5 points")
+        
+        # Special case: If any source says it's false, limit the maximum score
+        if false_count > 0 or mostly_false_count > 0:
+            score = min(60, score)  # Cap at 60 if any source says false
+            logger.debug("Applied score cap of 60 due to some 'False' ratings")
+        
+        # Cap the score
         final_score = max(0, min(100, score))
         logger.info(f"Final reliability score: {final_score}")
         return final_score
